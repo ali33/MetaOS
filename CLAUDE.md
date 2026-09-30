@@ -4,53 +4,22 @@ MetaOS: desktop web kiểu GNOME để quản trị máy chủ Linux. Backend Go
 metaos-auth setuid PAM, metaos-bridge chạy bằng uid người đăng nhập), frontend React + TS + Vite
 nhúng vào Go, một WebSocket nhiều kênh, đăng nhập PAM + TOTP.
 
-## Sheet quản lý dự án — nguồn sự thật về tiến độ
+## Sheet quản lý dự án
 
-Sheet **"[X] MetaOS"** là file quản lý dự án: toàn bộ hạng mục, việc đã làm, việc dự kiến,
-trạng thái, người phụ trách, commit.
-https://docs.google.com/spreadsheets/d/1pIaFPXpWtPoOLYjyaM_I-ZIf8DzfQjd0aURTUt8FG7I/edit?gid=0#gid=0
-(file id `1pIaFPXpWtPoOLYjyaM_I-ZIf8DzfQjd0aURTUt8FG7I`, tab `Sheet1`)
+Nguồn sự thật về tiến độ và phản hồi của tester. Quy trình đọc/ghi, cấu trúc cột, trạng thái: skill
+**`quan-ly-du-an`** (`~/.claude/skills/quan-ly-du-an/`). Đầu phiên đọc sheet để lấy việc kế tiếp và phản hồi
+đang mở; sau mỗi lần bắt đầu/xong việc, commit, đổi kế hoạch, bị chặn, xử lý phản hồi ⇒ cập nhật sheet.
 
-### Cấu trúc (không đổi thứ tự cột)
-
-| Cột | Tên | Giá trị |
-|---|---|---|
-| A | Mã | `M0-xx` thiết kế/quản lý · `M1-xx`…`M5-xx` task theo mốc (xx = số Task trong kế hoạch) · `M2`…`M5` dòng tổng của mốc chưa lập kế hoạch · `X1`… sau MVP |
-| B | Mốc | `M1 Nền + Terminal`, `M2 Quản lý file`, `M3 Giám sát`, `M4 Dịch vụ & log`, `M5 Ra Internet`, `Sau MVP` |
-| C | Hạng mục | tên ngắn, đọc được không cần mở tài liệu |
-| D | Loại | Tài liệu · Rà soát · Quản lý · Quyết định · Phát triển · Mốc |
-| E | Phụ thuộc | mã các dòng khác, cách nhau bởi dấu phẩy |
-| F | Trạng thái | **Chưa lập kế hoạch · Chưa làm · Đang làm · Chờ duyệt · Bị chặn · Xong · Tồn đọng · Huỷ** |
-| G | Ưu tiên | Cao · Trung bình · Thấp |
-| H | Phụ trách | `Claude` hoặc `Chủ dự án` (quyết định/duyệt) |
-| I, J | Bắt đầu, Hoàn thành | `YYYY-MM-DD` |
-| K | Commit | hash ngắn, nhiều hash cách nhau bởi dấu cách |
-| L | Tài liệu | đường dẫn trong repo, kèm `— Task N` hoặc `§mục` |
-| M | Ghi chú | lý do bị chặn, quyết định, việc dời mốc… |
-
-### Khi nào cập nhật
-
-- **Đầu phiên:** đọc sheet để biết việc đang dở và việc kế tiếp (task `Chưa làm` có mọi phụ thuộc đã `Xong`).
-- **Bắt đầu một task** ⇒ `Đang làm` + ngày bắt đầu.
-- **Xong một task** (test xanh, đã commit) ⇒ `Xong` + ngày hoàn thành + hash commit.
-- **Gặp lỗi chặn / chờ người dùng** ⇒ `Bị chặn` hoặc `Chờ duyệt`, ghi lý do ở cột M.
-- **Lập kế hoạch mốc mới** ⇒ thay dòng tổng `Mx` bằng các dòng `Mx-01…`; **đổi kế hoạch/quyết định** ⇒ sửa
-  dòng liên quan và ghi lý do ở cột M. Dòng bỏ thì đặt `Huỷ`, **không xoá** (giữ dấu vết).
-- Sheet phải khớp với kế hoạch (`docs/superpowers/plans/`) và spec (`docs/superpowers/specs/`).
-
-### Cách đọc / ghi
-
-- **Đọc:** Google Drive connector `read_file_content` với file id trên (nhanh, không cần trình duyệt).
-- **Ghi:** Drive connector **không ghi được ô**. Người dùng đã chọn ghi qua **Chrome** (claude-in-chrome):
-  mở sheet, bấm chọn ô đích (vd. ô cột F của dòng task), rồi dán bằng JavaScript:
-  ```js
-  const dt = new DataTransfer();
-  dt.setData('text/plain', 'Xong\t\t\t2026-10-01');   // Tab = sang ô phải, \n = xuống dòng
-  document.activeElement.dispatchEvent(new ClipboardEvent('paste', {clipboardData: dt, bubbles: true, cancelable: true}));
-  ```
-  Ghi xong **đọc lại bằng Drive connector** để xác nhận đã lưu.
-- Không đọc được hoặc không ghi được (thiếu quyền, Chrome không phản hồi, lỗi kết nối) ⇒ báo ngay cho
-  người dùng, không bỏ qua im lặng.
+- Sheet: **"[X] MetaOS"** — https://docs.google.com/spreadsheets/d/1pIaFPXpWtPoOLYjyaM_I-ZIf8DzfQjd0aURTUt8FG7I/edit?gid=0#gid=0
+- File id: `1pIaFPXpWtPoOLYjyaM_I-ZIf8DzfQjd0aURTUt8FG7I`
+- Tab `Công việc` (trước đây tên `Sheet1`): gid `0` · mã `M0-xx`…`M5-xx`, dòng tổng `M2`…`M5`, `X` sau MVP, `TD-xx` tồn đọng
+- Tab `Phản hồi`: gid `<chưa có — điền sau khi tạo tab>` · mã `PH-001`…
+- Chủ dự án (duyệt đề xuất, quyết định): `Chủ dự án` (chưa có họ tên — điền khi người dùng cho biết)
+- Tester: chưa có
+- Spec: `docs/superpowers/specs/` · kế hoạch: `docs/superpowers/plans/`
+- Đọc qua Drive: chưa kiểm với hai tab
+- Ghi: qua Chrome theo skill (§4) — chỉ dán khối liền không có ô rỗng (ô rỗng sẽ xoá ô đích). Không đọc/ghi
+  được ⇒ báo ngay cho người dùng, không bỏ qua im lặng.
 
 ## Tài liệu chính
 
