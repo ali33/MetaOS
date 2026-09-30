@@ -2,12 +2,12 @@ import { useEffect, useState } from 'react'
 import type { ConnState } from '../lib/channel'
 import type { ThemePref } from './prefs'
 
-const CONN: Record<ConnState, { cls: string; text: string }> = {
-  connecting: { cls: 'conn-wait', text: 'Đang kết nối…' },
-  open: { cls: 'conn-open', text: 'Đã kết nối' },
-  reconnecting: { cls: 'conn-bad', text: 'Mất kết nối — đang nối lại…' },
-  replaced: { cls: 'conn-bad', text: 'Phiên đang mở ở tab khác' },
-  expired: { cls: 'conn-bad', text: 'Phiên đã hết hạn' },
+const CONN: Record<ConnState, { cls: string; text: string; glyph: string }> = {
+  connecting: { cls: 'conn-wait', text: 'Đang kết nối…', glyph: '' },
+  open: { cls: 'conn-open', text: 'Đã kết nối', glyph: '' },
+  reconnecting: { cls: 'conn-bad', text: 'Mất kết nối — đang nối lại…', glyph: '⚠' },
+  replaced: { cls: 'conn-bad', text: 'Phiên đang mở ở tab khác', glyph: '⚠' },
+  expired: { cls: 'conn-bad', text: 'Phiên đã hết hạn', glyph: '✕' },
 }
 
 const fmt = new Intl.DateTimeFormat('vi-VN', { weekday: 'short', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
@@ -33,7 +33,8 @@ export function TopBar(p: Props) {
       <time>{fmt.format(now)}</time>
       <div className="right">
         <span title={c.text} aria-label={c.text} role="status">
-          {waiting ? <span className="spin" style={{ width: 10, height: 10 }} aria-hidden /> : <span className={`conn-dot ${c.cls}`} />}
+          {waiting && <span className="spin" style={{ width: 10, height: 10 }} aria-hidden />}
+          {c.glyph ? <span className="conn-glyph" style={{ color: '#ff6b6b' }} aria-hidden>{c.glyph}</span> : !waiting && <span className={`conn-dot ${c.cls}`} />}
         </span>
         <span>{p.hostname}</span>
         <button aria-haspopup="menu" aria-expanded={menu} onClick={() => setMenu(!menu)}>{p.user} ▾</button>

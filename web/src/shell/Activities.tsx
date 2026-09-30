@@ -14,9 +14,12 @@ export function Activities({ wins, apps, onPickWindow, onLaunch, onClose }: Prop
   return (
     <div className="activities" role="dialog" aria-label="Hoạt động"
       onKeyDown={(e) => { if (e.key === 'Escape') onClose() }}
-      onClick={(e) => { if (e.target === e.currentTarget) onClose() }}>
+      onClick={(e) => {
+        const t = e.target as HTMLElement
+        if (t === e.currentTarget || t.classList.contains('thumbs')) onClose()
+      }}>
       <input autoFocus placeholder="Tìm ứng dụng…" aria-label="Tìm ứng dụng" value={q} onChange={(e) => setQ(e.target.value)}
-        onKeyDown={(e) => { if (e.key === 'Enter' && matches[0]) onLaunch(matches[0].id) }} />
+        onKeyDown={(e) => { if (e.key === 'Enter' && needle && matches[0]) onLaunch(matches[0].id) }} />
       {needle ? (
         <div className="thumbs">
           {matches.length === 0 && <p>Không có ứng dụng nào khớp “{q}”.</p>}

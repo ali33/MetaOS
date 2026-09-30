@@ -56,3 +56,61 @@ test('đăng xuất gọi API có CSRF rồi báo lên', async () => {
   await waitFor(() => expect(onLoggedOut).toHaveBeenCalled())
   expect(fetchMock.mock.calls[0][1].headers['X-MetaOS-CSRF']).toBe('tok')
 })
+
+function openSocket() {
+  let sock: any
+  const factory = (() => (sock = socket())) as any
+  return { factory, get: () => sock, open() { act(() => { sock.readyState = 1; sock.onopen({}) }) } }
+}
+
+test('đăng xuất mà máy chủ trả 401: coi như đã đăng xuất, không có băng đỏ', async () => {
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401 })))
+  const onLoggedOut = vi.fn()
+  renderDesktop({ onLoggedOut })
+  fireEvent.click(screen.getByText('alice ▾'))
+  fireEvent.click(screen.getByText('Đăng xuất'))
+  await waitFor(() => expect(onLoggedOut).toHaveBeenCalled())
+  expect(screen.queryByRole('alert')).toBeNull()
+})
+
+test('đăng xuất lỗi khác 401: hiện băng đỏ, không báo đã đăng xuất', async () => {
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: 'internal' }), { status: 500 })))
+  vi.spyOn(console, 'error').mockImplementation(() => {})
+  const onLoggedOut = vi.fn()
+  const banners = new BannerList()
+  renderDesktop({ onLoggedOut, globalBanners: banners })
+  fireEvent.click(screen.getByText('alice ▾'))
+  fireEvent.click(screen.getByText('Đăng xuất'))
+  await waitFor(() => expect(banners.items.length).toBe(1))
+  expect(banners.items[0].level).toBe('error')
+  expect(onLoggedOut).not.toHaveBeenCalled()
+})
+
+test('WebSocket đóng 4401 ⇒ onExpired', () => {
+  const s = openSocket()
+  const onExpired = vi.fn()
+  renderDesktop({ connOptions: { socketFactory: s.factory }, onExpired })
+  s.open()
+  act(() => s.get().onclose({ code: 4401, reason: '' }))
+  expect(onExpired).toHaveBeenCalled()
+})
+
+test('WebSocket đóng 4001 ⇒ băng hổ phách "Đã mở ở nơi khác"', () => {
+  const s = openSocket()
+  const banners = new BannerList()
+  renderDesktop({ connOptions: { socketFactory: s.factory }, globalBanners: banners })
+  s.open()
+  act(() => s.get().onclose({ code: 4001, reason: '' }))
+  expect(banners.items.map((b) => [b.level, b.text.startsWith('Đã mở ở nơi khác')])).toEqual([['warn', true]])
+})
+
+test('đóng bằng nút ✕ của khung: cửa sổ mở lại không thừa hưởng băng lỗi cũ', () => {
+  renderDesktop()
+  fireEvent.keyDown(window, { key: 't', ctrlKey: true, altKey: true })
+  fireEvent.click(screen.getByText('báo lỗi'))
+  expect(screen.getByRole('alert')).toBeTruthy()
+  fireEvent.click(screen.getByLabelText('Đóng'))
+  expect(screen.queryByRole('alert')).toBeNull()
+  fireEvent.keyDown(window, { key: 't', ctrlKey: true, altKey: true })
+  expect(screen.queryByRole('alert')).toBeNull()
+})

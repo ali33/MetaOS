@@ -31,6 +31,9 @@ function useDrag(onMove: (dx: number, dy: number) => void, onEnd?: (e: RPE) => v
       last.current = null
       onEnd?.(e)
     },
+    // Chạm bị huỷ / mất capture: bỏ trạng thái kéo, không chốt vị trí.
+    onPointerCancel() { last.current = null },
+    onLostPointerCapture() { last.current = null },
   }
 }
 

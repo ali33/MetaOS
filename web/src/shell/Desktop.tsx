@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import { APPS, type AppDef } from '../apps/registry'
-import { currentSession, logout, type SessionInfo } from '../lib/api'
+import { ApiError, currentSession, logout, type SessionInfo } from '../lib/api'
 import { Connection, type ConnOptions, type ConnState } from '../lib/channel'
 import { BannerList } from '../lib/errors'
 import { Activities } from './Activities'
@@ -67,13 +67,20 @@ export function Desktop({ session, apps = APPS, connOptions, globalBanners, onLo
     return l
   }
 
+  const adoptFor = useRef(new Map<string, string>()) // winId → id kênh cần tiếp quản
+  // Dọn băng lỗi và id tiếp quản của cửa sổ đã đóng, dù đóng bằng đường nào.
+  useEffect(() => {
+    const alive = new Set(wm.wins.map((w) => w.id))
+    for (const id of [...winBanners.current.keys()]) if (!alive.has(id)) winBanners.current.delete(id)
+    for (const id of [...adoptFor.current.keys()]) if (!alive.has(id)) adoptFor.current.delete(id)
+  }, [wm.wins])
+
   const [activities, setActivities] = useState(false)
   const [theme, setTheme] = useState<ThemePref>(() => loadPref('metaos.theme', ['system', 'light', 'dark'] as const, 'system'))
   const [dockAlways, setDockAlways] = useState(() => loadPref('metaos.dockAlways', ['0', '1'] as const, '0') === '1')
   useEffect(() => { applyTheme(theme); savePref('metaos.theme', theme) }, [theme])
   useEffect(() => savePref('metaos.dockAlways', dockAlways ? '1' : '0'), [dockAlways])
 
-  const adoptFor = useRef(new Map<string, string>()) // winId → id kênh cần tiếp quản
   const launch = (appId: string, adopt?: string) => {
     const app = apps.find((a) => a.id === appId)
     if (!app) return globalBanners.add('warn', `Không có ứng dụng "${appId}".`)
@@ -108,6 +115,11 @@ export function Desktop({ session, apps = APPS, connOptions, globalBanners, onLo
       conn.dispose()
       onLoggedOut()
     } catch (e) {
+      if (e instanceof ApiError && e.status === 401) { // phiên đã mất sẵn: coi như đã đăng xuất
+        conn.dispose()
+        onLoggedOut()
+        return
+      }
       console.error(e)
       globalBanners.add('error', `Đăng xuất không thành công: ${(e as Error).message}`)
       setLoggingOut(false)
@@ -130,7 +142,7 @@ export function Desktop({ session, apps = APPS, connOptions, globalBanners, onLo
               <App winId={w.id} conn={conn} connState={connState} active={wm.focused === w.id} adopt={adoptFor.current.get(w.id)}
                 report={(level, text) => list.add(level, text)} clearReports={(level) => list.clear(level)}
                 setTitle={(title) => dispatch({ type: 'setTitle', id: w.id, title })}
-                requestClose={() => { winBanners.current.delete(w.id); dispatch({ type: 'close', id: w.id }) }} />
+                requestClose={() => dispatch({ type: 'close', id: w.id })} />
             </Window>
           )
         })}
