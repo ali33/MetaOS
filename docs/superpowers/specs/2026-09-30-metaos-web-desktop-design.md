@@ -1,7 +1,7 @@
 # MetaOS — Desktop web kiểu GNOME để quản trị máy chủ Linux
 
 - Ngày: 2026-09-30
-- Trạng thái: Chờ duyệt
+- Trạng thái: Đã duyệt (2026-09-30); cập nhật quyết định phiên và phạm vi M1 cùng ngày
 - Repo: https://github.com/ali33/MetaOS
 
 ## 1. Mục tiêu
@@ -109,7 +109,11 @@ Một WebSocket cho mỗi phiên trình duyệt, chia thành nhiều kênh.
 - Bí mật TOTP: `/var/lib/metaos/totp/<user>`, quyền 0600, chủ `metaos`. RFC 6238,
   SHA1, 6 số, bước 30 giây, chấp nhận lệch ±1 bước, chặn dùng lại cùng mã.
 - Cookie phiên: ngẫu nhiên 256 bit, `HttpOnly; Secure; SameSite=Strict`. Phiên hết
-  hạn sau 12 giờ, hoặc 30 phút không hoạt động. Đăng xuất / hết hạn ⇒ giết bridge.
+  hạn sau 12 giờ, hoặc 30 phút không hoạt động. Đăng xuất / hết hạn ⇒ dừng hết:
+  giết bridge và mọi lệnh đang chạy, giống thoát SSH. Lệnh cố ý tách riêng
+  (`nohup`, `setsid`, tmux) được sống; không dùng cgroup/scope để quét sạch.
+- Một WebSocket cho mỗi phiên: tab/máy thứ hai mở cùng phiên thì **giành phiên** —
+  tab cũ báo "Đã mở ở nơi khác", tab mới tiếp quản các terminal đang chạy.
 - Chặn CSRF: `POST` phải kèm header `X-MetaOS-CSRF` trùng giá trị trong phiên;
   WebSocket kiểm `Origin` trùng host.
 - Chặn dò mật khẩu: tối đa 5 lần sai / 15 phút cho mỗi IP và cho mỗi user; vượt thì
@@ -134,8 +138,8 @@ Một WebSocket cho mỗi phiên trình duyệt, chia thành nhiều kênh.
 ## 4. Giao diện desktop
 
 - **Thanh trên cùng**: nút Hoạt động (trái), đồng hồ (giữa), tên máy + chỉ báo
-  CPU/RAM thu nhỏ + menu user (khoá màn hình, đăng xuất) (phải).
-- **Chế độ Hoạt động** (phím Super / nút / góc trên-trái): lưới cửa sổ thu nhỏ,
+  CPU/RAM thu nhỏ (từ M3) + menu user (khoá màn hình — từ M5, đăng xuất) (phải).
+- **Chế độ Hoạt động** (phím Super / nút / góc trên-trái — góc nóng từ M2): lưới cửa sổ thu nhỏ,
   ô tìm ứng dụng, dock.
 - **Dock**: hiện ở chế độ Hoạt động; tuỳ chọn luôn hiện.
 - **Trình quản lý cửa sổ** (tự viết): kéo, đổi cỡ 8 hướng, thu nhỏ/phóng to/đóng,
@@ -146,7 +150,7 @@ Một WebSocket cho mỗi phiên trình duyệt, chia thành nhiều kênh.
   ở `~/.config/metaos/desktop.json` qua kênh `fs`; đăng nhập lại thì phục hồi.
 - **Giao diện**: sáng/tối theo hệ điều hành, đổi tay được; phông Inter; màu định
   nghĩa bằng token CSS.
-- **Khoá màn hình**: phủ toàn màn, yêu cầu mật khẩu Linux (qua PAM) để mở; bridge
+- **Khoá màn hình** (M5): phủ toàn màn, yêu cầu mật khẩu Linux (qua PAM) để mở; bridge
   và terminal vẫn chạy.
 
 ## 5. Bốn ứng dụng
@@ -234,11 +238,11 @@ sang backend. `make dev` dựng cả hai.
 
 | Mốc | Nội dung | Dùng được gì khi xong |
 |---|---|---|
-| M1 | Protocol, ws, auth PAM (chưa TOTP), bridge, khung desktop + trình quản lý cửa sổ, Terminal | Đăng nhập và dùng terminal trong desktop web |
-| M2 | Quản lý file + Monaco | Quản lý file |
-| M3 | Giám sát hệ thống + tiến trình | Theo dõi máy |
+| M1 | Protocol, ws, auth PAM (chưa TOTP), bridge, khung desktop + trình quản lý cửa sổ (chưa có góc nóng, khoá màn hình, chỉ báo CPU/RAM), Terminal | Đăng nhập và dùng terminal trong desktop web |
+| M2 | Quản lý file + Monaco; lưu trạng thái desktop; cài đặt phím tắt; góc nóng | Quản lý file |
+| M3 | Giám sát hệ thống + tiến trình; chỉ báo CPU/RAM trên thanh trên cùng | Theo dõi máy |
 | M4 | Dịch vụ & log, luồng sudo | Quản trị dịch vụ |
-| M5 | TOTP, chặn dò mật khẩu, HTTPS tự ký, gói `.deb`, rà bảo mật | Được phép mở ra Internet |
+| M5 | TOTP, chặn dò mật khẩu, HTTPS tự ký, khoá màn hình, gói `.deb`, rà bảo mật | Được phép mở ra Internet |
 
 **Không mở cổng ra Internet trước khi xong M5.**
 
