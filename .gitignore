@@ -1,0 +1,5 @@
+.omc/
+node_modules/
+web/dist/
+/bin/
+*.deb
