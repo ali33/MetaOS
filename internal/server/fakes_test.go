@@ -35,6 +35,8 @@ type fakeBridge struct {
 	done     chan struct{}
 	stopped  bool
 	stopOnce sync.Once
+	// beforeSend (nếu có) chạy trước khi ghi nhận frame, ngoài khoá — test dùng để giữ một Send lại.
+	beforeSend func(protocol.Frame)
 }
 
 func newFakeBridge() *fakeBridge {
@@ -44,6 +46,12 @@ func newFakeBridge() *fakeBridge {
 // Send giữ khoá cả lúc đẩy vào frames để không bao giờ đẩy vào kênh đã đóng
 // (bộ đệm 64 là đủ cho test).
 func (b *fakeBridge) Send(f protocol.Frame) error {
+	b.mu.Lock()
+	hook := b.beforeSend
+	b.mu.Unlock()
+	if hook != nil {
+		hook(f)
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.stopped {
@@ -68,6 +76,7 @@ func (b *fakeBridge) Stop() {
 		close(b.done)
 	})
 }
+func (b *fakeBridge) setBeforeSend(h func(protocol.Frame)) { b.mu.Lock(); b.beforeSend = h; b.mu.Unlock() }
 func (b *fakeBridge) isStopped() bool { b.mu.Lock(); defer b.mu.Unlock(); return b.stopped }
 
 // controls trả các type điều khiển (ch rỗng) đã gửi xuống, theo thứ tự.

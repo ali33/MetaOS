@@ -27,6 +27,10 @@ type Session struct {
 	ID, CSRF, User, Hostname string
 	Bridge                   BridgeConn
 
+	// attachMu tuần tự hoá "đổi/gỡ WebSocket hiện tại + gửi attached/detached xuống bridge",
+	// để detached của socket cũ không bao giờ tới sau attached của socket mới (I3).
+	attachMu sync.Mutex
+
 	mu         sync.Mutex
 	created    time.Time
 	lastActive time.Time

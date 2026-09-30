@@ -83,6 +83,7 @@ func (s *Server) ws(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c.SetReadLimit(protocol.MaxFrame)
+	sess.attachMu.Lock()
 	s.mu.Lock()
 	old := s.conns[sess.ID]
 	s.conns[sess.ID] = c
@@ -100,6 +101,7 @@ func (s *Server) ws(w http.ResponseWriter, r *http.Request) {
 			delete(s.conns, sess.ID)
 		}
 		s.mu.Unlock()
+		sess.attachMu.Unlock()
 		if old != nil {
 			go old.Close(CloseSessionEnded, reason)
 		}
@@ -113,6 +115,7 @@ func (s *Server) ws(w http.ResponseWriter, r *http.Request) {
 		_ = sess.Bridge.Send(control(protocol.TypeDetached))
 	}
 	_ = sess.Bridge.Send(control(protocol.TypeAttached))
+	sess.attachMu.Unlock()
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
@@ -157,6 +160,7 @@ func (s *Server) ws(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
+	sess.attachMu.Lock()
 	s.mu.Lock()
 	isCurrent := s.conns[sess.ID] == c
 	if isCurrent {
@@ -166,6 +170,7 @@ func (s *Server) ws(w http.ResponseWriter, r *http.Request) {
 	if isCurrent {
 		_ = sess.Bridge.Send(control(protocol.TypeDetached))
 	}
+	sess.attachMu.Unlock()
 	c.CloseNow()
 }
 

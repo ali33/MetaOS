@@ -322,3 +322,40 @@ func TestShutdownClosesSocketsWith4401(t *testing.T) {
 		t.Fatalf("muốn 4401 shutdown, nhận %v", err)
 	}
 }
+
+// I3: detached của socket cũ bị chậm (Send kẹt) không được tới bridge SAU attached
+// của socket mới — nếu không, bridge tách kênh vừa gắn lại và giết shell sau 60 giây.
+func TestStaleDetachedNeverFollowsAttached(t *testing.T) {
+	l := newLive(t)
+	cookie, _ := l.loginLive(t)
+	c1 := l.mustDial(t, cookie)
+	b := l.l.lastBridge()
+	waitUntil(t, "attached", func() bool { return strings.Join(b.controls(), ",") == "attached" })
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once atomic.Bool
+	b.setBeforeSend(func(f protocol.Frame) {
+		if m, err := protocol.DecodeMessage(f.Data); err == nil && m.Type == protocol.TypeDetached && once.CompareAndSwap(false, true) {
+			close(entered)
+			<-release
+		}
+	})
+	c1.CloseNow() // vòng đọc của socket cũ gỡ nó rồi gửi detached — bị giữ lại ở đây
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("socket cũ không gửi detached")
+	}
+	c2 := l.mustDial(t, cookie)
+	defer c2.CloseNow()
+	// Chưa sửa: attached của c2 tới ngay trong lúc detached còn kẹt. Đã sửa: c2 chờ.
+	for i := 0; i < 15 && strings.Count(strings.Join(b.controls(), ","), "attached") < 2; i++ {
+		time.Sleep(20 * time.Millisecond)
+	}
+	close(release)
+	waitUntil(t, "đủ ba frame điều khiển", func() bool { return len(b.controls()) >= 3 })
+	if got := strings.Join(b.controls(), ","); got != "attached,detached,attached" {
+		t.Fatalf("thứ tự điều khiển sai: %s", got)
+	}
+}
