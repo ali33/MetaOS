@@ -18,7 +18,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
   export METAOS_LEAK_CANARY=1
   AS_METAOS="setpriv --reuid=metaos --regid=metaos --init-groups"
   A=/usr/lib/metaos/metaos-auth
-  out=$(printf "Mật khẩu 1\nFRAME" | $AS_METAOS $A alice)
+  # Người gọi có umask 077 và fd 9 không CLOEXEC: bridge phải nhận umask 022 và chỉ fd 0/1/2.
+  out=$(umask 077; printf "Mật khẩu 1\nFRAME" | $AS_METAOS $A alice 9</etc/hostname)
   echo "$out" | grep -qx "$(id -u alice)" || { echo "FAIL uid: $out"; exit 1; }
   echo "$out" | grep -qx "/home/alice"    || { echo "FAIL cwd"; exit 1; }
   echo "$out" | grep -q "^METAOS_LEAK_CANARY" && { echo "FAIL env lọt qua"; exit 1; }

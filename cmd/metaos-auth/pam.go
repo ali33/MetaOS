@@ -45,10 +45,11 @@ import (
 )
 
 // pamExit: mã thoát theo D1. Kết quả PAM không có trong bảng — lỗi hệ thống,
-// pam_start hỏng (PAM_BUF_ERR, PAM_SYSTEM_ERR, PAM_ABORT…) — là exitInternal.
+// pam_start hỏng (PAM_BUF_ERR, PAM_SYSTEM_ERR, PAM_ABORT…), PAM_AUTHINFO_UNAVAIL
+// (không tới được nguồn danh bạ = hạ tầng) — là exitInternal.
 var pamExit = map[C.int]int{
 	C.PAM_SUCCESS: exitOK, C.PAM_NEW_AUTHTOK_REQD: exitExpired, C.PAM_AUTH_ERR: exitAuth, C.PAM_USER_UNKNOWN: exitAuth,
-	C.PAM_MAXTRIES: exitAuth, C.PAM_ACCT_EXPIRED: exitAuth, C.PAM_PERM_DENIED: exitAuth, C.PAM_CRED_INSUFFICIENT: exitAuth, C.PAM_AUTHINFO_UNAVAIL: exitAuth,
+	C.PAM_MAXTRIES: exitAuth, C.PAM_ACCT_EXPIRED: exitAuth, C.PAM_PERM_DENIED: exitAuth, C.PAM_CRED_INSUFFICIENT: exitAuth,
 }
 
 // pamCheck: pw phải khác rỗng (authx.ReadPassword đã bảo đảm). Bản sao C của
