@@ -1,0 +1,22 @@
+[Unit]
+Description=MetaOS web desktop
+After=network.target
+
+[Service]
+User=metaos
+Group=metaos
+Environment=METAOS_LISTEN=0.0.0.0:9443
+EnvironmentFile=-/etc/default/metaos
+ExecStart=/usr/lib/metaos/metaos-ws --listen=${METAOS_LISTEN} --tls-cert=/etc/metaos/tls/cert.pem --tls-key=/etc/metaos/tls/key.pem $METAOS_OPTS
+SyslogIdentifier=metaos
+Restart=on-failure
+# KHÔNG đặt NoNewPrivileges=yes: nó vô hiệu bit setuid của metaos-auth.
+# KillMode mặc định (control-group): dừng dịch vụ thì systemd (root) giết cả
+# bridge lẫn shell của mọi phiên — lưới an toàn thứ hai sau cơ chế đóng stdin.
+# Hệ quả với Q3: tiến trình người dùng cố ý tách riêng (nohup, tmux) vẫn nằm
+# trong cgroup của metaos.service, nên sống qua đăng xuất nhưng CHẾT khi
+# `systemctl restart/stop metaos` (và khi nâng cấp gói ở M5). Muốn chúng sống
+# qua restart thì M5 phải quyết (ví dụ tách mỗi phiên vào scope riêng).
+
+[Install]
+WantedBy=multi-user.target
