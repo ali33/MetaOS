@@ -37,11 +37,16 @@ type Server struct {
 
 	mu    sync.Mutex
 	conns map[string]*websocket.Conn // WebSocket hiện tại của mỗi phiên (relay.go)
+
+	pingEvery time.Duration  // chu kỳ ping giao thức WebSocket (D9: không tính là hoạt động)
+	onPing    func()         // chỉ dùng trong test: gọi sau mỗi ping thành công
+	closing   sync.WaitGroup // các lần đóng WebSocket 4401 đang chạy (Shutdown chờ)
 }
 
 func New(cfg Config, store *Store, l Launcher, static fs.FS, logw io.Writer) *Server {
 	return &Server{cfg: cfg, store: store, launcher: l, static: static,
-		log: log.New(logw, "metaos-ws: ", 0), conns: map[string]*websocket.Conn{}}
+		log: log.New(logw, "metaos-ws: ", 0), conns: map[string]*websocket.Conn{},
+		pingEvery: defaultPingEvery}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -75,17 +80,24 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-func apiErr(w http.ResponseWriter, code int, e string) { writeJSON(w, code, map[string]string{"error": e}) }
+func apiErr(w http.ResponseWriter, code int, e string) {
+	writeJSON(w, code, map[string]string{"error": e})
+}
 
 // sameOrigin: không có Origin (client không phải trình duyệt) thì cho qua;
-// có thì host phải trùng Host của request.
+// có thì scheme phải khớp listener (https khi TLS, http chỉ khi HTTP thường —
+// Validate chỉ cho HTTP thường trên loopback) và host phải trùng Host của request.
 func sameOrigin(r *http.Request) bool {
 	o := r.Header.Get("Origin")
 	if o == "" {
 		return true
 	}
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
 	u, err := url.Parse(o)
-	return err == nil && strings.EqualFold(u.Host, r.Host)
+	return err == nil && strings.EqualFold(u.Scheme, scheme) && strings.EqualFold(u.Host, r.Host)
 }
 
 func clientIP(r *http.Request) string {
@@ -199,7 +211,11 @@ func (s *Server) sessionInfo(w http.ResponseWriter, r *http.Request) {
 		apiErr(w, http.StatusUnauthorized, "no-session")
 		return
 	}
-	s.store.Touch(sess)
+	if !s.store.TouchLive(sess) {
+		s.store.End(sess.ID, "expired")
+		apiErr(w, http.StatusUnauthorized, "no-session")
+		return
+	}
 	writeJSON(w, http.StatusOK, sessionBody{sess.User, sess.CSRF, sess.Hostname})
 }
 

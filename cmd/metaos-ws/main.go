@@ -43,12 +43,23 @@ func main() {
 		// ép HTTP/1.1 để trình duyệt luôn nâng cấp bằng Upgrade.
 		TLSNextProto: map[string]func(*http.Server, *tls.Conn, http.Handler){},
 	}
+	// Tắt: đóng mọi WebSocket 4401 "shutdown" và CHỜ frame đóng đi hết rồi mới
+	// thoát; tổng cộng tối đa 10 giây, dưới TimeoutStopSec mặc định (90 s) của systemd.
+	stopped := make(chan struct{})
 	go func() {
+		defer close(stopped)
 		<-ctx.Done()
-		store.EndAll("shutdown")
-		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		sctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		_ = hs.Shutdown(sctx)
+		// Song song: hs.Shutdown đóng listener ngay nhưng có thể chờ một request
+		// đăng nhập đang dở; không để nó ăn hết hạn chót của việc đóng WebSocket.
+		httpDone := make(chan struct{})
+		go func() {
+			defer close(httpDone)
+			_ = hs.Shutdown(sctx)
+		}()
+		srv.Shutdown(sctx)
+		<-httpDone
 	}()
 	logger.Printf("listening on %s (tls=%v)", cfg.Listen, cfg.TLS())
 	var err error
@@ -60,4 +71,5 @@ func main() {
 	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		logger.Fatal(err)
 	}
+	<-stopped
 }

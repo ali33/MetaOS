@@ -2,10 +2,10 @@ package server
 
 import (
 	"context"
-	"net/http/httptest"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -245,5 +245,17 @@ func TestLogoutWithMatchingOrigin(t *testing.T) {
 	w := e.do("POST", "/api/logout", "", map[string]string{"Cookie": cookie, CSRFHeader: csrf, "Origin": "https://srv1:9443"})
 	if w.Code != 204 {
 		t.Fatalf("%d", w.Code)
+	}
+}
+
+func TestLoginRejectsWrongSchemeOrigin(t *testing.T) {
+	e := newTestServer(t)
+	// Listener TLS: Origin http cùng host là nguồn khác.
+	w := e.do("POST", "/api/login", `{"user":"alice","password":"Mật khẩu 1"}`, map[string]string{"Origin": "http://srv1:9443"})
+	if w.Code != 403 {
+		t.Fatalf("muốn 403, nhận %d %s", w.Code, w.Body)
+	}
+	if e.l.callCount() != 0 {
+		t.Fatal("không được gọi launcher khi Origin sai")
 	}
 }

@@ -123,6 +123,19 @@ func (st *Store) Touch(s *Session) {
 	s.mu.Unlock()
 }
 
+// TouchLive ghi nhận hoạt động chỉ khi phiên chưa hết hạn; false nghĩa là phiên
+// đã quá hạn (người gọi phải End) — hoạt động muộn không được hồi sinh phiên.
+func (st *Store) TouchLive(s *Session) bool {
+	now := st.clock.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ended || now.Sub(s.created) >= st.max || now.Sub(s.lastActive) >= st.idle {
+		return false
+	}
+	s.lastActive = now
+	return true
+}
+
 func (st *Store) End(id, reason string) {
 	st.mu.Lock()
 	s := st.m[id]
@@ -166,7 +179,14 @@ func (st *Store) EndAll(reason string) {
 		ids = append(ids, id)
 	}
 	st.mu.Unlock()
+	// Song song: mỗi End dừng một bridge, tuần tự thì tắt máy chậm theo số phiên.
+	var wg sync.WaitGroup
 	for _, id := range ids {
-		st.End(id, reason)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			st.End(id, reason)
+		}()
 	}
+	wg.Wait()
 }

@@ -13,8 +13,8 @@ import (
 const (
 	CloseReplaced     websocket.StatusCode = 4001
 	CloseSessionEnded websocket.StatusCode = 4401
-	pingEvery                              = 30 * time.Second
-	writeTimeout                           = 10 * time.Second
+	defaultPingEvery                       = 30 * time.Second
+	writeTimeout                           = 5 * time.Second
 )
 
 func (s *Server) current(id string) *websocket.Conn {
@@ -32,7 +32,11 @@ func (s *Server) startSession(sess *Session) {
 		delete(s.conns, sess.ID)
 		s.mu.Unlock()
 		if c != nil {
-			go c.Close(CloseSessionEnded, reason)
+			s.closing.Add(1)
+			go func() {
+				defer s.closing.Done()
+				c.Close(CloseSessionEnded, reason)
+			}()
 		}
 	})
 	go s.pump(sess)
@@ -83,8 +87,13 @@ func (s *Server) ws(w http.ResponseWriter, r *http.Request) {
 	old := s.conns[sess.ID]
 	s.conns[sess.ID] = c
 	s.mu.Unlock()
-	// Phiên có thể kết thúc giữa s.session(r) và lúc đăng ký c: móc OnEnd đã
-	// chạy rồi nên không ai đóng c nữa — tự đóng 4401.
+	// Phiên có thể kết thúc giữa s.session(r) và lúc đăng ký c. Tuyến tính hoá:
+	// End đặt ended=true (dưới sess.mu) TRƯỚC khi chạy móc OnEnd, còn móc lấy c
+	// khỏi s.conns dưới s.mu. Ta đăng ký c dưới s.mu rồi mới đọc ended, nên chỉ
+	// có hai thứ tự: (a) móc chạy sau khi c đã đăng ký ⇒ móc đóng c; (b) móc đã
+	// chạy trước ⇒ ta chắc chắn thấy ended=true ở đây và tự đóng c (và cái cũ ta
+	// vừa thay chỗ, vì móc không còn thấy nó). Hai bên cùng đóng thì vô hại.
+	// Không có test tất định cho khe này (cần chèn móc vào giữa hàm).
 	if ended, reason := sess.endState(); ended {
 		s.mu.Lock()
 		if s.conns[sess.ID] == c {
@@ -108,7 +117,7 @@ func (s *Server) ws(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	go func() {
-		t := time.NewTicker(pingEvery)
+		t := time.NewTicker(s.pingEvery)
 		defer t.Stop()
 		for {
 			select {
@@ -122,6 +131,9 @@ func (s *Server) ws(w http.ResponseWriter, r *http.Request) {
 					c.CloseNow()
 					return
 				}
+				if s.onPing != nil {
+					s.onPing()
+				}
 			}
 		}
 	}()
@@ -130,7 +142,13 @@ func (s *Server) ws(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			break
 		}
-		s.store.Touch(sess)
+		if !s.store.TouchLive(sess) {
+			// Frame tới sau hạn không hoạt động không được hồi sinh phiên. End
+			// chạy móc OnEnd: gỡ c và đóng 4401 "expired" — không CloseNow ở đây
+			// kẻo cắt ngang frame đóng.
+			s.store.End(sess.ID, "expired")
+			return
+		}
 		kind := protocol.KindText
 		if typ == websocket.MessageBinary {
 			kind = protocol.KindBinary
@@ -149,4 +167,19 @@ func (s *Server) ws(w http.ResponseWriter, r *http.Request) {
 		_ = sess.Bridge.Send(control(protocol.TypeDetached))
 	}
 	c.CloseNow()
+}
+
+// Shutdown kết thúc mọi phiên (WebSocket nhận 4401 "shutdown") và chờ các
+// lần đóng WebSocket xong, tối đa tới hạn của ctx.
+func (s *Server) Shutdown(ctx context.Context) {
+	s.store.EndAll("shutdown")
+	done := make(chan struct{})
+	go func() {
+		s.closing.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
 }
