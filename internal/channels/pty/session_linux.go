@@ -7,7 +7,8 @@ import (
 	"syscall"
 )
 
-// sessionPIDs trả mọi pid có session id = sid, đọc từ /proc/<pid>/stat.
+// sessionPIDs trả mọi pid còn sống (bỏ zombie) có session id = sid, đọc từ
+// /proc/<pid>/stat.
 func sessionPIDs(sid int) []int {
 	ents, _ := os.ReadDir("/proc")
 	var out []int
@@ -27,7 +28,7 @@ func sessionPIDs(sid int) []int {
 			continue
 		}
 		f := strings.Fields(s[i+1:]) // f[0]=state f[1]=ppid f[2]=pgrp f[3]=session
-		if len(f) > 3 && f[3] == strconv.Itoa(sid) {
+		if len(f) > 3 && f[0] != "Z" && f[3] == strconv.Itoa(sid) {
 			out = append(out, pid)
 		}
 	}
@@ -55,12 +56,26 @@ func ignoresHUP(pid int) bool {
 	return false
 }
 
+// spared: tiến trình được tha khi đóng kênh — bỏ qua SIGHUP và KHÔNG phải chính
+// shell (pid == sid). Shell đăng nhập không bao giờ là lệnh "cố ý tách riêng".
+func spared(pid, sid int) bool { return pid != sid && ignoresHUP(pid) }
+
 // killSession: SIGKILL mọi tiến trình còn trong session trừ những tiến trình
-// cố ý bỏ qua SIGHUP (Q3: nohup được sống, giống SSH).
+// được tha (Q3: nohup được sống, giống SSH).
 func killSession(sid int) {
 	for _, pid := range sessionPIDs(sid) {
-		if !ignoresHUP(pid) {
+		if !spared(pid, sid) {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
 		}
 	}
+}
+
+// sessionSettled: session không còn tiến trình nào mà killSession sẽ giết.
+func sessionSettled(sid int) bool {
+	for _, pid := range sessionPIDs(sid) {
+		if !spared(pid, sid) {
+			return false
+		}
+	}
+	return true
 }

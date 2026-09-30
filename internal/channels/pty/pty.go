@@ -61,12 +61,21 @@ type channel struct {
 	quit chan struct{} // đóng khi kênh kết thúc
 
 	dropping atomic.Bool // đang bỏ phím vì hàng đợi đầy (chỉ báo một lần mỗi đợt)
+	attached atomic.Bool // đang có client: pump được gửi đầu ra
 
-	mu          sync.Mutex
-	ring        *Ring
-	attached    bool
-	detachTimer *time.Timer
+	// mu là khoá I/O: giữ thứ tự ring + đầu ra + replay + control close. Được giữ
+	// QUA lệnh gửi (có thể kẹt nếu ống stdout của bridge đầy), nên Close, Detach
+	// và việc giết tiến trình KHÔNG BAO GIỜ được lấy khoá này.
+	mu       sync.Mutex
+	ring     *Ring
+	finished bool // đã gửi control close; không gửi gì thêm
+
+	// st là khoá trạng thái nhỏ, không bao giờ giữ qua I/O.
+	st          sync.Mutex
+	exited      bool // shell đã được thu dọn (cmd.Wait trả về): pid có thể bị dùng lại
 	closeReason string
+	detachTimer *time.Timer
+	killTimer   *time.Timer
 	closeOnce   sync.Once
 	killed      chan struct{} // đóng sau khi killSession của Close đã chạy
 }
@@ -126,8 +135,9 @@ func New(a channels.OpenArgs) (channels.Channel, error) {
 	if err != nil {
 		return nil, &channels.Error{Code: protocol.CodeFromErr(err), Err: err}
 	}
-	c := &channel{id: a.ID, out: a.Out, done: a.Done, cmd: cmd, tty: tty, ring: NewRing(RingSize), attached: true,
+	c := &channel{id: a.ID, out: a.Out, done: a.Done, cmd: cmd, tty: tty, ring: NewRing(RingSize),
 		in: make(chan []byte, inputQueue), quit: make(chan struct{}), killed: make(chan struct{})}
+	c.attached.Store(true)
 	pumpDone := make(chan struct{})
 	go c.writer()
 	go func() { c.pump(); close(pumpDone) }()
@@ -161,7 +171,7 @@ func (c *channel) pump() {
 		if n > 0 {
 			c.mu.Lock()
 			c.ring.Write(buf[:n])
-			if c.attached {
+			if c.attached.Load() && !c.finished {
 				_ = c.out.SendBinary(c.id, buf[:n])
 			}
 			c.mu.Unlock()
@@ -179,6 +189,15 @@ func (c *channel) pump() {
 // đợi pump tối đa ExitDrain để lấy nốt đầu ra, đóng master, rồi gửi close.
 func (c *channel) finish(pumpDone <-chan struct{}) {
 	werr := c.cmd.Wait()
+	// Lý do đóng chốt tại lúc shell thoát: Close sau thời điểm này không bắn tín
+	// hiệu nữa (pid đã được thu dọn, có thể thuộc tiến trình khác).
+	c.st.Lock()
+	c.exited = true
+	reason := c.closeReason
+	if c.detachTimer != nil {
+		c.detachTimer.Stop()
+	}
+	c.st.Unlock()
 	select {
 	case <-pumpDone:
 	case <-time.After(ExitDrain):
@@ -189,17 +208,10 @@ func (c *channel) finish(pumpDone <-chan struct{}) {
 	case <-pumpDone:
 	case <-time.After(ExitDrain):
 	}
-	c.mu.Lock()
-	c.attached = false // pump còn sót (nếu có) không được gửi sau close
-	reason := c.closeReason
-	if c.detachTimer != nil {
-		c.detachTimer.Stop()
-	}
-	c.mu.Unlock()
 	if reason != "" {
 		// Bị đóng có lý do (Close): bước SIGKILL là một phần của việc đóng. Router
-		// thoát ngay sau Done, nên phải chờ killSession chạy xong rồi mới báo.
-		<-c.killed
+		// thoát ngay sau Done, nên phải chờ tới khi phiên không còn gì phải giết.
+		c.awaitKill(c.cmd.Process.Pid)
 	}
 	cd := protocol.CloseData{Ch: c.id, Reason: reason}
 	if reason == "" {
@@ -211,8 +223,39 @@ func (c *channel) finish(pumpDone <-chan struct{}) {
 		}
 		cd.ExitCode = &code
 	}
+	// Dưới khoá I/O: không đầu ra/replay nào đi sau control close. Nếu ống ra
+	// đang kẹt thì Done chờ tới khi nó thông — tiến trình đã bị giết từ trước.
+	c.mu.Lock()
+	c.attached.Store(false)
+	c.finished = true
 	_ = c.out.SendText(protocol.Control(protocol.TypeClose, cd))
+	c.mu.Unlock()
 	c.done()
+}
+
+// awaitKill chờ bước SIGKILL của Close, hoặc sớm hơn nếu phiên đã sạch (không
+// còn tiến trình nào ngoài những tiến trình bỏ qua SIGHUP) — khi đó huỷ hẹn giờ
+// SIGKILL để không bắn vào một sid có thể đã bị dùng lại.
+func (c *channel) awaitKill(sid int) {
+	tick := time.NewTicker(20 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if sessionSettled(sid) {
+			c.st.Lock()
+			stopped := c.killTimer.Stop()
+			c.st.Unlock()
+			if stopped {
+				return
+			}
+			<-c.killed // hẹn giờ đang chạy: chờ nó xong
+			return
+		}
+		select {
+		case <-c.killed:
+			return
+		case <-tick.C:
+		}
+	}
 }
 
 func (c *channel) HandleText(m protocol.Message) {
@@ -248,9 +291,12 @@ func (c *channel) sendErr(code, msg string) {
 func (c *channel) Reattachable() bool { return true }
 
 func (c *channel) Detach() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.attached = false
+	c.attached.Store(false)
+	c.st.Lock()
+	defer c.st.Unlock()
+	if c.exited {
+		return
+	}
 	if c.detachTimer != nil {
 		c.detachTimer.Stop()
 	}
@@ -258,15 +304,21 @@ func (c *channel) Detach() {
 }
 
 // Reattach gửi `replay` rồi phần đầu ra client còn thiếu (theo params.offset),
-// hoặc bản chụp kèm reset=true nếu offset đã trôi khỏi bộ đệm.
+// hoặc bản chụp kèm reset=true nếu offset đã trôi khỏi bộ đệm. Kênh đã gửi
+// close thì không gửi gì.
 func (c *channel) Reattach(params json.RawMessage) {
 	var p Params
 	_ = json.Unmarshal(params, &p)
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.st.Lock()
 	if c.detachTimer != nil {
 		c.detachTimer.Stop()
 		c.detachTimer = nil
+	}
+	c.st.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.finished {
+		return
 	}
 	data, start, reset := c.ring.From(p.Offset)
 	rd, _ := json.Marshal(ReplayData{Reset: reset, Offset: start})
@@ -274,20 +326,25 @@ func (c *channel) Reattach(params json.RawMessage) {
 	if len(data) > 0 {
 		_ = c.out.SendBinary(c.id, data)
 	}
-	c.attached = true
+	c.attached.Store(true)
 }
 
-// Close: SIGHUP cho cả session của shell; sau KillGrace thì SIGKILL những gì
-// còn lại trừ tiến trình cố ý bỏ qua SIGHUP (Q1, Q3 — giống thoát SSH: nohup và
-// tmux/setsid được sống). finish() chỉ gửi control close và gọi Done sau khi
-// shell đã thoát VÀ killSession đã chạy — Done không đến trước bước SIGKILL.
+// Close: SIGHUP cho cả session của shell; sau KillGrace thì SIGKILL chính shell
+// và những gì còn lại trừ tiến trình cố ý bỏ qua SIGHUP (Q1, Q3 — giống thoát
+// SSH: nohup và tmux/setsid được sống). finish() chỉ gửi control close và gọi
+// Done sau khi shell đã thoát VÀ phiên không còn gì phải giết. Không chặn: chỉ
+// dùng khoá trạng thái nhỏ, không bao giờ chờ khoá I/O. Shell đã được thu dọn
+// thì không làm gì.
 func (c *channel) Close(reason string) {
 	c.closeOnce.Do(func() {
-		c.mu.Lock()
+		c.st.Lock()
+		defer c.st.Unlock()
+		if c.exited {
+			return
+		}
 		c.closeReason = reason
-		c.mu.Unlock()
 		sid := c.cmd.Process.Pid
 		signalSession(sid, syscall.SIGHUP)
-		time.AfterFunc(KillGrace, func() { killSession(sid); close(c.killed) })
+		c.killTimer = time.AfterFunc(KillGrace, func() { killSession(sid); close(c.killed) })
 	})
 }

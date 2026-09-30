@@ -312,3 +312,145 @@ func TestPtyReattachCancelsTimeout(t *testing.T) {
 	case <-time.After(600 * time.Millisecond):
 	}
 }
+
+// blockSender: SendBinary chặn cho tới khi release đóng — như ống stdout của
+// bridge đầy vì ws đã ngừng đọc (đăng xuất). SendText vẫn đi.
+type blockSender struct {
+	fakeSender
+	entered chan struct{}
+	once    sync.Once
+	release chan struct{}
+}
+
+func (b *blockSender) SendBinary(ch string, p []byte) error {
+	b.once.Do(func() { close(b.entered) })
+	<-b.release
+	return b.fakeSender.SendBinary(ch, p)
+}
+
+// Review Focus #1: Close không được chờ một khoá đang bị giữ qua lệnh ghi đầu ra.
+func TestPtyCloseNotBlockedByStuckOutput(t *testing.T) {
+	s := &blockSender{entered: make(chan struct{}), release: make(chan struct{})}
+	done := make(chan struct{})
+	c, err := New(channels.OpenArgs{ID: "t1", Params: json.RawMessage(`{"cols":80,"rows":24,"shell":"/bin/bash"}`), Out: s, Done: func() { close(done) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(s.release) }) }
+	t.Cleanup(func() { unblock(); c.Close("test-cleanup") })
+	select {
+	case <-s.entered: // pump đang kẹt trong SendBinary
+	case <-time.After(5 * time.Second):
+		t.Fatal("shell không in gì")
+	}
+	pid := c.(*channel).cmd.Process.Pid
+	returned := make(chan struct{})
+	go func() { c.Detach(); c.Close("shutdown"); close(returned) }()
+	select {
+	case <-returned:
+	case <-time.After(time.Second):
+		t.Fatal("Detach/Close bị chặn sau lệnh ghi đầu ra đang kẹt")
+	}
+	waitFor(t, "shell chết dù đầu ra kẹt", func() bool { return !alive(pid) })
+	unblock()
+	select {
+	case <-done:
+	case <-time.After(KillGrace + 2*time.Second):
+		t.Fatal("Done chưa được gọi sau khi đầu ra thông")
+	}
+	if cd, _ := s.closeMsg(); cd.Reason != "shutdown" {
+		t.Fatalf("reason = %q", cd.Reason)
+	}
+}
+
+// D6: shell đăng nhập bỏ qua SIGHUP vẫn phải chết — shell không bao giờ là lệnh
+// "cố ý tách riêng" (Q3 chỉ tha tiến trình con dùng nohup/setsid).
+func TestPtyCloseKillsHUPIgnoringShell(t *testing.T) {
+	home := t.TempDir()
+	if err := os.WriteFile(home+"/.bash_profile", []byte("trap '' HUP\necho READY-$((2*21))\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	c, s, done := open(t, `{"cols":80,"rows":24,"shell":"/bin/bash"}`)
+	waitFor(t, "READY-42", func() bool { return strings.Contains(s.output(), "READY-42") })
+	pid := c.(*channel).cmd.Process.Pid
+	if !ignoresHUP(pid) {
+		t.Fatalf("shell %d phải đang bỏ qua SIGHUP", pid)
+	}
+	c.Close("client")
+	select {
+	case <-done:
+	case <-time.After(KillGrace + time.Second):
+		t.Fatal("shell bỏ qua SIGHUP không bị giết: Done chưa được gọi")
+	}
+	if alive(pid) {
+		t.Fatalf("shell %d vẫn sống", pid)
+	}
+}
+
+// Shell đã thoát (đã được thu dọn) ⇒ Close/Detach muộn không được bắn tín hiệu:
+// pid có thể đã thuộc về tiến trình khác.
+func TestPtyLateCloseDoesNotSignal(t *testing.T) {
+	old := DetachTimeout
+	DetachTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { DetachTimeout = old })
+	c, s, done := open(t, `{"cols":80,"rows":24,"shell":"/bin/bash"}`)
+	c.HandleBinary([]byte("sleep 303 & echo JPID=$!; exit 0\n"))
+	re := regexp.MustCompile(`JPID=(\d+)`)
+	waitFor(t, "JPID", func() bool { return re.MatchString(s.output()) })
+	jpid, _ := strconv.Atoi(re.FindStringSubmatch(s.output())[1])
+	t.Cleanup(func() { _ = syscallKill(jpid) })
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Done chưa được gọi")
+	}
+	if !alive(jpid) {
+		t.Fatalf("job nền %d phải còn sống sau khi shell tự thoát", jpid)
+	}
+	c.Detach()
+	c.Close("client")
+	time.Sleep(300 * time.Millisecond)
+	if !alive(jpid) {
+		t.Fatalf("Close/Detach sau khi shell đã thoát vẫn bắn tín hiệu: job %d đã chết", jpid)
+	}
+	if cd, _ := s.closeMsg(); cd.Reason != "exit" {
+		t.Fatalf("reason = %q", cd.Reason)
+	}
+}
+
+// Phiên đã sạch (không còn tiến trình nào phải giết) thì không phải chờ đủ KillGrace.
+func TestPtyCloseFastWhenSessionClean(t *testing.T) {
+	c, _, done := open(t, `{"cols":80,"rows":24,"shell":"/bin/bash"}`)
+	time.Sleep(200 * time.Millisecond)
+	start := time.Now()
+	c.Close("client")
+	select {
+	case <-done:
+	case <-time.After(KillGrace + 2*time.Second):
+		t.Fatal("Done chưa được gọi")
+	}
+	if d := time.Since(start); d >= KillGrace/2 {
+		t.Fatalf("Done sau %s — phiên đã sạch thì không phải chờ KillGrace %s", d, KillGrace)
+	}
+}
+
+// Gắn lại một kênh đã kết thúc: không được gửi replay sau control close.
+func TestPtyReattachAfterFinishSendsNothing(t *testing.T) {
+	c, s, done := open(t, `{"cols":80,"rows":24,"shell":"/bin/bash"}`)
+	c.HandleBinary([]byte("exit 0\n"))
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Done chưa được gọi")
+	}
+	s.reset()
+	c.Reattach(nil)
+	if _, ok := s.findMsg("replay"); ok {
+		t.Fatal("đã gửi replay sau close")
+	}
+	if out := s.output(); out != "" {
+		t.Fatalf("đã gửi đầu ra sau close: %q", out)
+	}
+}
