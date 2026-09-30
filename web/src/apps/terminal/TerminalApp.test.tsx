@@ -53,8 +53,9 @@ function setup(adopt?: string) {
   return { opened, props, ...r }
 }
 
+const roCallbacks: (() => void)[] = []
 beforeAll(() => {
-  vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} })
+  vi.stubGlobal('ResizeObserver', class { constructor(cb: () => void) { roCallbacks.push(cb) } observe() {} disconnect() {} })
 })
 
 test('mở kênh pty reattachable với cỡ của xterm', () => {
@@ -164,4 +165,30 @@ test('không ghi vào xterm sau khi gỡ', () => {
   unmount()
   opened[0].h.onBinary!(new Uint8Array(3))
   expect(terms[0].written).toHaveLength(0)
+})
+
+test('gắn lại đổi cỡ rồi quay về cỡ cũ: vẫn gửi resize (last được cập nhật)', () => {
+  vi.useFakeTimers()
+  try {
+    roCallbacks.length = 0
+    const { opened } = setup()
+    act(() => opened[0].h.onReady!())
+    act(() => { opened[0].h.onReattach!() })
+    terms[0].cols = 100; terms[0].rows = 30
+    act(() => opened[0].h.onReady!())
+    terms[0].cols = 80; terms[0].rows = 24
+    act(() => { roCallbacks.at(-1)!(); vi.advanceTimersByTime(80) })
+    expect(opened[0].ch.sendText).toHaveBeenLastCalledWith('resize', { cols: 80, rows: 24 })
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+test('lỗi kênh sau khi ready (vd. hàng đợi đầy) lên băng hổ phách, không phải đỏ', () => {
+  const { opened, props, container } = setup()
+  act(() => opened[0].h.onReady!())
+  act(() => opened[0].h.onError!('internal', 'input queue full'))
+  expect(props.report).toHaveBeenCalledWith('warn', 'internal: input queue full')
+  expect(props.report).not.toHaveBeenCalledWith('error', expect.anything())
+  expect(container.querySelector('.phu-lop')).toBeNull()
 })

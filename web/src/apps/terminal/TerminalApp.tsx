@@ -92,6 +92,7 @@ function TermTab({ app, adopt, visible, onTitle, onExit, onNewTab }: TabProps) {
     let reattaching = false
     let received = 0 // tổng byte đầu ra đã nhận — gửi lên khi gắn lại
     safeFit()
+    let last = { cols: term.cols, rows: term.rows } // cỡ đã báo cho pty gần nhất
     const handlers: ChannelHandlers = {
       onReady: () => {
         ready = true
@@ -99,7 +100,8 @@ function TermTab({ app, adopt, visible, onTitle, onExit, onNewTab }: TabProps) {
         if (reattaching) { // cỡ có thể đã đổi trong lúc rời
           reattaching = false
           safeFit()
-          ch.sendText('resize', { cols: term.cols, rows: term.rows })
+          last = { cols: term.cols, rows: term.rows }
+          ch.sendText('resize', last)
         }
       },
       onReattach: () => { reattaching = true; setPhase('reattaching'); return { offset: received } },
@@ -111,7 +113,8 @@ function TermTab({ app, adopt, visible, onTitle, onExit, onNewTab }: TabProps) {
       onBinary: (d) => { received += d.length; if (!disposed) term.write(d) },
       onError: (code, message) => {
         if (!ready) setPhase('closed') // mở lỗi: kênh đã bị bỏ, không còn gì để chờ
-        cb.current.report('error', `${code}: ${message}`)
+        // Sau ready kênh vẫn sống (vd. hàng đợi nhập đầy, mất vài phím) ⇒ hổ phách; mở lỗi mới là đỏ.
+        cb.current.report(ready ? 'warn' : 'error', `${code}: ${message}`)
       },
       onClose: (reason, code) => {
         setPhase('closed')
@@ -140,7 +143,6 @@ function TermTab({ app, adopt, visible, onTitle, onExit, onNewTab }: TabProps) {
       if (k === 'f') { setSearchOpen((v) => !v); return false }
       return true
     })
-    let last = { cols: term.cols, rows: term.rows }
     let timer: ReturnType<typeof setTimeout> | undefined
     const ro = new ResizeObserver(() => {
       clearTimeout(timer)
