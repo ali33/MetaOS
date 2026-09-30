@@ -256,5 +256,10 @@ sang backend. `make dev` dựng cả hai.
   tránh lệch glibc.
 - **Phím tắt bị trình duyệt giữ** (Super, Ctrl+W, Alt+Tab trên một số hệ): có
   phương án thay và ghi rõ trong trợ giúp.
+- **Tiến trình tách riêng chết khi restart dịch vụ** (giới hạn đã biết của M1):
+  `nohup`/`setsid`/tmux sống qua đăng xuất nhưng vẫn thuộc cgroup của
+  `metaos.service` (`KillMode=control-group`), nên chết khi restart/dừng dịch vụ
+  hoặc nâng cấp gói. M5 xem xét chạy bridge trong scope riêng theo user
+  (`systemd-run` / logind). M1 không đổi `KillMode`.
 - **journalctl theo thời gian thực** có thể nặng trên máy nhiều log: giới hạn tốc
   độ đẩy và số dòng giữ trên trình duyệt (mặc định 5.000).
