@@ -112,6 +112,8 @@ Một WebSocket cho mỗi phiên trình duyệt, chia thành nhiều kênh.
   hạn sau 12 giờ, hoặc 30 phút không hoạt động. Đăng xuất / hết hạn ⇒ dừng hết:
   giết bridge và mọi lệnh đang chạy, giống thoát SSH. Lệnh cố ý tách riêng
   (`nohup`, `setsid`, tmux) được sống; không dùng cgroup/scope để quét sạch.
+  Hệ quả: chúng vẫn thuộc cgroup của `metaos.service` nên chết khi restart/dừng
+  dịch vụ hoặc nâng cấp gói — M5 quyết có tách scope riêng hay không.
 - Một WebSocket cho mỗi phiên: tab/máy thứ hai mở cùng phiên thì **giành phiên** —
   tab cũ báo "Đã mở ở nơi khác", tab mới tiếp quản các terminal đang chạy.
 - Chặn CSRF: `POST` phải kèm header `X-MetaOS-CSRF` trùng giá trị trong phiên;
