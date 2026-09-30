@@ -1,0 +1,314 @@
+package pty
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"regexp"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/ali33/MetaOS/internal/channels"
+	"github.com/ali33/MetaOS/internal/protocol"
+)
+
+type fakeSender struct {
+	mu   sync.Mutex
+	out  bytes.Buffer
+	msgs []protocol.Message
+}
+
+func (f *fakeSender) SendText(m protocol.Message) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.msgs = append(f.msgs, m)
+	return nil
+}
+func (f *fakeSender) SendBinary(ch string, p []byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.out.Write(p)
+	return nil
+}
+func (f *fakeSender) output() string { f.mu.Lock(); defer f.mu.Unlock(); return f.out.String() }
+func (f *fakeSender) reset()         { f.mu.Lock(); defer f.mu.Unlock(); f.out.Reset() }
+func (f *fakeSender) findMsg(typ string) (protocol.Message, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := len(f.msgs) - 1; i >= 0; i-- {
+		if f.msgs[i].Type == typ {
+			return f.msgs[i], true
+		}
+	}
+	return protocol.Message{}, false
+}
+func (f *fakeSender) closeMsg() (protocol.CloseData, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, m := range f.msgs {
+		if m.Type == protocol.TypeClose {
+			var c protocol.CloseData
+			_ = json.Unmarshal(m.Data, &c)
+			return c, true
+		}
+	}
+	return protocol.CloseData{}, false
+}
+
+func syscallKill(pid int) error { p, _ := os.FindProcess(pid); return p.Kill() }
+
+// alive: tiến trình còn chạy thật; zombie (trạng thái Z) coi như đã chết.
+func alive(pid int) bool {
+	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return false
+	}
+	st := string(b)
+	i := strings.LastIndexByte(st, ')')
+	return i >= 0 && len(st) > i+2 && st[i+2] != 'Z'
+}
+
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("hết giờ chờ: %s", what)
+}
+
+func open(t *testing.T, params string) (channels.Channel, *fakeSender, chan struct{}) {
+	t.Helper()
+	s := &fakeSender{}
+	done := make(chan struct{})
+	c, err := New(channels.OpenArgs{ID: "t1", Params: json.RawMessage(params), Out: s, Done: func() { close(done) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close("test-cleanup") })
+	return c, s, done
+}
+
+func TestPtyEcho(t *testing.T) {
+	c, s, _ := open(t, `{"cols":80,"rows":24,"shell":"/bin/bash"}`)
+	c.HandleBinary([]byte("echo hi-$((1+1))\n"))
+	waitFor(t, "hi-2", func() bool { return bytes.Contains([]byte(s.output()), []byte("hi-2")) })
+}
+
+func TestPtyResize(t *testing.T) {
+	c, s, _ := open(t, `{"cols":80,"rows":24,"shell":"/bin/bash"}`)
+	c.HandleText(protocol.Message{Ch: "t1", Type: "resize", Data: json.RawMessage(`{"cols":100,"rows":40}`)})
+	c.HandleBinary([]byte("stty size\n"))
+	waitFor(t, "40 100", func() bool { return bytes.Contains([]byte(s.output()), []byte("40 100")) })
+}
+
+func TestPtyExitSendsCloseWithCode(t *testing.T) {
+	c, s, done := open(t, `{"cols":80,"rows":24,"shell":"/bin/bash"}`)
+	c.HandleBinary([]byte("exit 3\n"))
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Done chưa được gọi")
+	}
+	cd, ok := s.closeMsg()
+	if !ok || cd.Reason != "exit" || cd.ExitCode == nil || *cd.ExitCode != 3 {
+		t.Fatalf("close = %+v ok=%v", cd, ok)
+	}
+}
+
+func TestPtyInvalidParams(t *testing.T) {
+	cases := map[string]string{
+		`{"cols":0,"rows":24}`:                            protocol.CodeInvalidParams,
+		`{"cols":80,"rows":1001}`:                         protocol.CodeInvalidParams,
+		`{"cols":80,"rows":24,"shell":"/usr/bin/env"}`:    protocol.CodeInvalidParams,
+		`{"cols":80,"rows":24,"cwd":"/khong-co-thu-muc"}`: protocol.CodeNotFound,
+		`{"cols":80,"rows":24,"cwd":"/etc/hostname"}`:     protocol.CodeInvalidParams,
+		`không phải json`:                                 protocol.CodeInvalidParams,
+	}
+	for params, code := range cases {
+		_, err := New(channels.OpenArgs{ID: "x", Params: json.RawMessage(params), Out: &fakeSender{}, Done: func() {}})
+		var ce *channels.Error
+		if !errors.As(err, &ce) || ce.Code != code {
+			t.Errorf("%s: got %v, want code %s", params, err, code)
+		}
+	}
+}
+
+func TestPtyCloseKillsProcessGroup(t *testing.T) { // Review Focus #1
+	c, s, done := open(t, `{"cols":80,"rows":24,"shell":"/bin/bash"}`)
+	c.HandleBinary([]byte("sleep 300 & echo PID=$!\n"))
+	re := regexp.MustCompile(`PID=(\d+)`)
+	waitFor(t, "PID", func() bool { return re.MatchString(s.output()) })
+	pid, _ := strconv.Atoi(re.FindStringSubmatch(s.output())[1])
+	c.Close("client")
+	<-done
+	waitFor(t, "job nền chết", func() bool { return !alive(pid) })
+	if cd, _ := s.closeMsg(); cd.Reason != "client" {
+		t.Fatalf("reason = %q", cd.Reason)
+	}
+}
+
+// Q3: lệnh cố ý tách riêng được sống sau khi kênh đóng (đăng xuất / hết hạn).
+func TestPtyCloseSparesDetached(t *testing.T) {
+	old := KillGrace
+	KillGrace = 300 * time.Millisecond
+	t.Cleanup(func() { KillGrace = old })
+	c, s, done := open(t, `{"cols":80,"rows":24,"shell":"/bin/bash"}`)
+	// setsid fork khi đang là trưởng nhóm (job nền của bash luôn là trưởng nhóm),
+	// nên $! là pid của tiến trình cha đã thoát. Để tiến trình mới tự in pid của nó.
+	c.HandleBinary([]byte("nohup sleep 301 >/dev/null 2>&1 & echo NPID=$!; setsid sh -c 'echo SPID=$$; exec sleep 302' </dev/null 2>/dev/null &\n"))
+	re := regexp.MustCompile(`NPID=(\d+)[\s\S]*SPID=(\d+)\r?\n`)
+	waitFor(t, "pid", func() bool { return re.MatchString(s.output()) })
+	m := re.FindStringSubmatch(s.output())
+	npid, _ := strconv.Atoi(m[1])
+	spid, _ := strconv.Atoi(m[2])
+	t.Cleanup(func() { _ = syscallKill(npid); _ = syscallKill(spid) })
+	c.Close("client")
+	<-done
+	time.Sleep(KillGrace + 500*time.Millisecond)
+	if !alive(npid) || !alive(spid) {
+		t.Fatalf("nohup còn=%v setsid còn=%v — cả hai phải sống", alive(npid), alive(spid))
+	}
+}
+
+// D6/Q1: tiến trình BẮT (không bỏ qua) SIGHUP vẫn phải chết khi kênh bị đóng, và
+// phải chết TRƯỚC khi Done được gọi — router thoát ngay sau Done, nên SIGKILL hẹn
+// giờ sau Done sẽ không bao giờ chạy.
+func TestPtyCloseKillsHUPCatcher(t *testing.T) {
+	c, s, done := open(t, `{"cols":80,"rows":24,"shell":"/bin/bash"}`)
+	c.HandleBinary([]byte(`bash -c 'trap ":" HUP; echo CPID=$$; while :; do sleep .1; done' &` + "\n"))
+	re := regexp.MustCompile(`CPID=(\d+)\r?\n`)
+	waitFor(t, "CPID", func() bool { return re.MatchString(s.output()) })
+	pid, _ := strconv.Atoi(re.FindStringSubmatch(s.output())[1])
+	t.Cleanup(func() { _ = syscallKill(pid) })
+	if !alive(pid) {
+		t.Fatalf("tiến trình bắt HUP %d chưa chạy", pid)
+	}
+	c.Close("client")
+	select {
+	case <-done:
+	case <-time.After(KillGrace + 5*time.Second):
+		t.Fatal("Done chưa được gọi")
+	}
+	// SIGKILL đã gửi trước Done; chỉ chừa chút thời gian để nhân kết liễu tiến trình.
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for alive(pid) && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if alive(pid) {
+		t.Fatalf("tiến trình bắt SIGHUP %d vẫn sống sau khi Done được gọi", pid)
+	}
+	if cd, _ := s.closeMsg(); cd.Reason != "client" {
+		t.Fatalf("reason = %q", cd.Reason)
+	}
+}
+
+func TestPtyDetachReattachReplays(t *testing.T) {
+	c, s, _ := open(t, `{"cols":80,"rows":24,"shell":"/bin/bash"}`)
+	c.HandleBinary([]byte("echo MARK-$((6*7))\n"))
+	waitFor(t, "MARK-42", func() bool { return bytes.Contains([]byte(s.output()), []byte("MARK-42")) })
+	c.Detach()
+	s.reset()
+	c.Reattach(nil) // không có offset ⇒ bản chụp đầy đủ, reset=true
+	if !bytes.Contains([]byte(s.output()), []byte("MARK-42")) {
+		t.Fatalf("không phát lại bộ đệm: %q", s.output())
+	}
+	m, ok := s.findMsg("replay")
+	var rd ReplayData
+	_ = json.Unmarshal(m.Data, &rd)
+	if !ok || !rd.Reset {
+		t.Fatalf("muốn replay reset=true, nhận %s", m.Data)
+	}
+}
+
+func TestPtyReattachSendsOnlyMissed(t *testing.T) {
+	c, s, _ := open(t, `{"cols":80,"rows":24,"shell":"/bin/bash"}`)
+	c.HandleBinary([]byte("echo ONE-$((1+0))\n"))
+	waitFor(t, "ONE-1", func() bool { return strings.Contains(s.output(), "ONE-1") })
+	time.Sleep(300 * time.Millisecond) // để dấu nhắc in xong
+	got := uint64(len(s.output()))
+	c.Detach()
+	c.HandleBinary([]byte("echo TWO-$((1+1))\n")) // chạy lúc đang rớt: chỉ vào bộ đệm
+	time.Sleep(500 * time.Millisecond)
+	s.reset()
+	c.Reattach(json.RawMessage(fmt.Sprintf(`{"reattach":true,"offset":%d}`, got)))
+	out := s.output()
+	if strings.Contains(out, "ONE-1") || !strings.Contains(out, "TWO-2") {
+		t.Fatalf("chỉ được gửi phần còn thiếu: %q", out)
+	}
+	m, _ := s.findMsg("replay")
+	var rd ReplayData
+	_ = json.Unmarshal(m.Data, &rd)
+	if rd.Reset || rd.Offset != got {
+		t.Fatalf("replay = %+v, muốn reset=false offset=%d", rd, got)
+	}
+}
+
+func TestPtyInputDoesNotBlock(t *testing.T) { // Review Focus #5
+	c, s, _ := open(t, `{"cols":80,"rows":24,"shell":"/bin/bash"}`)
+	c.HandleBinary([]byte("sleep 30\n")) // chương trình tiền cảnh không đọc stdin
+	time.Sleep(300 * time.Millisecond)
+	chunk := bytes.Repeat([]byte("x"), 32<<10)
+	start := time.Now()
+	for i := 0; i < 200; i++ { // 6,4 MB
+		c.HandleBinary(chunk)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("HandleBinary bị chặn %s", d)
+	}
+	waitFor(t, "báo hàng đợi đầy", func() bool {
+		m, ok := s.findMsg(protocol.TypeError)
+		return ok && strings.Contains(string(m.Data), "input queue full")
+	})
+}
+
+func TestPtyExitWithBackgroundJobClosesChannel(t *testing.T) {
+	c, s, done := open(t, `{"cols":80,"rows":24,"shell":"/bin/bash"}`)
+	c.HandleBinary([]byte("sleep 100 & exit 0\n")) // job nền vẫn giữ đầu slave của PTY
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("shell đã thoát mà kênh không đóng")
+	}
+	if cd, _ := s.closeMsg(); cd.Reason != "exit" || cd.ExitCode == nil || *cd.ExitCode != 0 {
+		t.Fatalf("close = %+v", cd)
+	}
+}
+
+func TestPtyDetachTimeout(t *testing.T) {
+	old := DetachTimeout
+	DetachTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { DetachTimeout = old })
+	c, s, done := open(t, `{"cols":80,"rows":24,"shell":"/bin/bash"}`)
+	c.Detach()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("kênh không tự đóng sau DetachTimeout")
+	}
+	if cd, _ := s.closeMsg(); cd.Reason != "detach-timeout" {
+		t.Fatalf("reason = %q", cd.Reason)
+	}
+}
+
+func TestPtyReattachCancelsTimeout(t *testing.T) {
+	old := DetachTimeout
+	DetachTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { DetachTimeout = old })
+	c, _, done := open(t, `{"cols":80,"rows":24,"shell":"/bin/bash"}`)
+	c.Detach()
+	c.Reattach(nil)
+	select {
+	case <-done:
+		t.Fatal("gắn lại rồi mà kênh vẫn bị đóng")
+	case <-time.After(600 * time.Millisecond):
+	}
+}
