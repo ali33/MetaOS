@@ -1,3 +1,4 @@
+import { TerminalApp } from './terminal/TerminalApp'
 import type { JSX } from 'react'
 import type { Connection, ConnState } from '../lib/channel'
 import type { Level } from '../lib/errors'
@@ -16,5 +17,7 @@ export type AppProps = {
 
 export type AppDef = { id: string; name: string; icon: string; keywords: string[]; component: (p: AppProps) => JSX.Element }
 
-// Task 17 thêm Terminal. M2–M4 thêm Quản lý file, Giám sát, Dịch vụ & log.
-export const APPS: AppDef[] = []
+// M2–M4 thêm Quản lý file, Giám sát, Dịch vụ & log.
+export const APPS: AppDef[] = [
+  { id: 'terminal', name: 'Terminal', icon: '>_', keywords: ['terminal', 'shell', 'bash', 'console'], component: TerminalApp },
+]
