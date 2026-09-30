@@ -51,6 +51,12 @@ func (s *Session) OnEnd(f func(reason string)) {
 	s.mu.Unlock()
 }
 
+func (s *Session) endState() (bool, string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ended, s.endReason
+}
+
 type Store struct {
 	clock     Clock
 	max, idle time.Duration

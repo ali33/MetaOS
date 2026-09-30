@@ -36,7 +36,7 @@ type Server struct {
 	log      *log.Logger
 
 	mu    sync.Mutex
-	conns map[string]*websocket.Conn // Task 10: WebSocket hiện tại của mỗi phiên
+	conns map[string]*websocket.Conn // WebSocket hiện tại của mỗi phiên (relay.go)
 }
 
 func New(cfg Config, store *Store, l Launcher, static fs.FS, logw io.Writer) *Server {
@@ -178,6 +178,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		failed(http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
+	s.startSession(sess)
 	if r.Context().Err() != nil { // client đã ngắt trong lúc chờ Launch
 		s.store.End(sess.ID, "client-gone")
 		return
@@ -253,9 +254,4 @@ func (s *Server) RunReaper(ctx context.Context, every time.Duration) {
 			s.store.Reap()
 		}
 	}
-}
-
-// ws được thay bằng bản thật ở Task 10 (relay.go).
-func (s *Server) ws(w http.ResponseWriter, r *http.Request) {
-	apiErr(w, http.StatusNotImplemented, "unsupported")
 }
