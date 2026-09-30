@@ -39,6 +39,9 @@ let seq = 0
 export class Channel {
   ready = false
   reattaching = false
+  // Đang chờ `replay` sau khi gửi open gắn lại: frame nhị phân tới trước replay là đầu ra cũ
+  // còn kẹt trong relay, đã nằm trong phần replay từ offset — bỏ để không in hai lần.
+  awaitReplay = false
   constructor(
     readonly id: string,
     readonly kind: string,
@@ -163,6 +166,7 @@ export class Connection {
     let params: object = ch.params
     if (ch.ready) {
       ch.reattaching = true
+      ch.awaitReplay = true
       const extra = ch.h.onReattach?.() ?? {}
       params = { ...ch.params, ...extra, reattach: true }
     }
@@ -182,7 +186,8 @@ export class Connection {
         this.o.onControlError?.('internal', `frame nhị phân hỏng: ${(err as Error).message}`)
         return
       }
-      this.chans.get(f.ch)?.h.onBinary?.(f.payload)
+      const c = this.chans.get(f.ch)
+      if (c && !c.awaitReplay) c.h.onBinary?.(f.payload)
       return
     }
     let m: Msg
@@ -192,7 +197,11 @@ export class Connection {
       this.o.onControlError?.('internal', `frame văn bản không phải JSON: ${data.slice(0, 120)}`)
       return
     }
-    if (m.ch) return void this.chans.get(m.ch)?.h.onText?.(m)
+    if (m.ch) {
+      const c = this.chans.get(m.ch)
+      if (c && m.type === 'replay') c.awaitReplay = false
+      return void c?.h.onText?.(m)
+    }
     const d = m.data ?? {}
     const ch = d.ch ? this.chans.get(d.ch) : undefined
     switch (m.type) {
@@ -200,10 +209,11 @@ export class Connection {
         if (ch) { ch.ready = true; ch.reattaching = false; ch.h.onReady?.() }
         return
       case 'close':
-        if (ch) { this.chans.delete(ch.id); ch.h.onClose?.(d.reason, d.exitCode) }
+        if (ch) { ch.awaitReplay = false; this.chans.delete(ch.id); ch.h.onClose?.(d.reason, d.exitCode) }
         return
       case 'error':
         if (!ch) return void this.o.onControlError?.(d.code, d.message)
+        ch.awaitReplay = false
         if (ch.reattaching && d.code === 'not-found') {
           this.chans.delete(ch.id)
           return void ch.h.onClose?.('gone')

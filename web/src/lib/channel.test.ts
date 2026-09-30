@@ -251,3 +251,36 @@ test('F3: closedSeen được dọn sau khung channels đầu tiên', async () =
   sockets[1].text({ ch: '', type: 'channels', data: [{ ch: pty.id, kind: 'pty' }] })
   expect(orphans).toHaveBeenCalledWith([{ ch: pty.id, kind: 'pty' }])
 })
+
+test('I1: gắn lại thì bỏ frame nhị phân cũ cho tới khi có replay', async () => {
+  const { conn, sockets, last } = setup()
+  sockets[0].open()
+  const got: string[] = []
+  const h = { onReattach: () => ({ offset: 3 }), onBinary: (p: Uint8Array) => got.push(new TextDecoder().decode(p)), onText: vi.fn() }
+  const pty = conn.open('pty', {}, h, { reattachable: true })
+  sockets[0].text({ ch: '', type: 'ready', data: { ch: pty.id } })
+  sockets[0].bin(pty.id, 'abc')
+  sockets[0].drop()
+  await vi.advanceTimersByTimeAsync(1000)
+  last().open()
+  last().bin(pty.id, 'cũ') // frame còn kẹt trong relay từ trước khi tách
+  last().text({ ch: pty.id, type: 'replay', data: { offset: 3, reset: false } })
+  last().bin(pty.id, 'mới')
+  expect(got).toEqual(['abc', 'mới'])
+  expect(h.onText).toHaveBeenCalledWith({ ch: pty.id, type: 'replay', data: { offset: 3, reset: false } })
+})
+
+test('I1: gắn lại bị error/close thì không còn chặn frame nhị phân', async () => {
+  const { conn, sockets, last } = setup()
+  sockets[0].open()
+  const got: string[] = []
+  const h = { onReattach: () => ({ offset: 0 }), onBinary: (p: Uint8Array) => got.push(new TextDecoder().decode(p)), onError: vi.fn() }
+  const pty = conn.open('pty', {}, h, { reattachable: true })
+  sockets[0].text({ ch: '', type: 'ready', data: { ch: pty.id } })
+  sockets[0].drop()
+  await vi.advanceTimersByTimeAsync(1000)
+  last().open()
+  last().text({ ch: '', type: 'error', data: { ch: pty.id, code: 'internal', message: 'x' } })
+  last().bin(pty.id, 'sau lỗi')
+  expect(got).toEqual(['sau lỗi'])
+})
