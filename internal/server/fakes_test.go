@@ -1,8 +1,15 @@
 package server
 
 import (
+	"context"
+	"encoding/json"
 	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync"
+	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/ali33/MetaOS/internal/protocol"
@@ -75,4 +82,85 @@ func (b *fakeBridge) controls() []string {
 		}
 	}
 	return out
+}
+
+type stubLauncher struct {
+	mu     sync.Mutex
+	calls  int
+	err    error
+	bridge *fakeBridge
+}
+
+func (l *stubLauncher) Launch(ctx context.Context, user string, pw []byte) (BridgeConn, protocol.HelloData, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.calls++
+	if l.err != nil {
+		return nil, protocol.HelloData{}, l.err
+	}
+	if string(pw) != "Mật khẩu 1" {
+		return nil, protocol.HelloData{}, ErrAuthFailed
+	}
+	l.bridge = newFakeBridge()
+	return l.bridge, protocol.HelloData{User: user, Hostname: "srv1"}, nil
+}
+
+func (l *stubLauncher) lastBridge() *fakeBridge { l.mu.Lock(); defer l.mu.Unlock(); return l.bridge }
+func (l *stubLauncher) callCount() int          { l.mu.Lock(); defer l.mu.Unlock(); return l.calls }
+
+type testEnv struct {
+	srv   *Server
+	h     http.Handler
+	clock *fakeClock
+	store *Store
+	l     *stubLauncher
+}
+
+func newTestServer(t *testing.T, mut ...func(*Config)) *testEnv {
+	t.Helper()
+	cfg := DefaultConfig()
+	for _, m := range mut {
+		m(&cfg)
+	}
+	clk := newFakeClock()
+	st := NewStore(clk, cfg.SessionMax, cfg.SessionIdle)
+	l := &stubLauncher{}
+	static := fstest.MapFS{
+		"index.html":    {Data: []byte("<!doctype html>INDEX")},
+		"assets/app.js": {Data: []byte("console.log(1)")},
+	}
+	srv := New(cfg, st, l, static, io.Discard)
+	return &testEnv{srv: srv, h: srv.Handler(), clock: clk, store: st, l: l}
+}
+
+func (e *testEnv) do(method, path, body string, hdr map[string]string) *httptest.ResponseRecorder {
+	r := httptest.NewRequest(method, "https://srv1:9443"+path, strings.NewReader(body))
+	r.Host = "srv1:9443"
+	if body != "" {
+		r.Header.Set("Content-Type", "application/json")
+	}
+	for k, v := range hdr {
+		r.Header.Set(k, v)
+	}
+	w := httptest.NewRecorder()
+	e.h.ServeHTTP(w, r)
+	return w
+}
+
+func (e *testEnv) login(t *testing.T, user, pw string) (cookie, csrf string) {
+	t.Helper()
+	w := e.do("POST", "/api/login", `{"user":"`+user+`","password":"`+pw+`"}`, nil)
+	if w.Code != 200 {
+		t.Fatalf("login %d %s", w.Code, w.Body)
+	}
+	for _, c := range w.Result().Cookies() {
+		if c.Name == CookieName {
+			cookie = c.Name + "=" + c.Value
+		}
+	}
+	var body struct {
+		CSRF string `json:"csrf"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &body)
+	return cookie, body.CSRF
 }
