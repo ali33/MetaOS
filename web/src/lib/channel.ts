@@ -35,6 +35,8 @@ export interface ConnOptions {
 }
 
 const enc = new TextEncoder()
+// Frame nhị phân gửi đi tối đa 64 KiB (kể cả đầu id kênh): dán khối lớn không vượt giới hạn đọc của máy chủ.
+export const MAX_SEND_FRAME = 64 * 1024
 let seq = 0
 
 export class Channel {
@@ -53,7 +55,10 @@ export class Channel {
   ) {}
   sendText(type: string, data?: unknown) { this.conn.sendRaw(JSON.stringify({ ch: this.id, type, data })) }
   sendBinary(p: Uint8Array | string) {
-    this.conn.sendRaw(encodeBinary(this.id, typeof p === 'string' ? enc.encode(p) : p))
+    const b = typeof p === 'string' ? enc.encode(p) : p
+    const step = MAX_SEND_FRAME - 1 - this.id.length
+    if (b.length <= step) return this.conn.sendRaw(encodeBinary(this.id, b))
+    for (let i = 0; i < b.length; i += step) this.conn.sendRaw(encodeBinary(this.id, b.subarray(i, i + step)))
   }
   close() { this.conn.closeChannel(this) }
 }

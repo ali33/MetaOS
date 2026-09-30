@@ -296,3 +296,24 @@ test('I2: 4401 chuyển kèm lý do đóng', () => {
   expect(conn.endReason).toBe('logout')
   expect(reasons.at(-1)).toBe('logout')
 })
+
+test('sendBinary chia dữ liệu lớn (dán > 1 MiB) thành frame ≤ 64 KiB, đúng thứ tự', () => {
+  const { conn, last } = setup()
+  last().open()
+  const ch = conn.open('pty', {}, {})
+  const big = new Uint8Array(1.5 * 1024 * 1024 + 7).map((_, i) => i % 251)
+  ch.sendBinary(big)
+  const frames = last().sent.filter((x): x is Uint8Array => x instanceof Uint8Array)
+  expect(frames.length).toBeGreaterThan(1)
+  for (const f of frames) expect(f.length).toBeLessThanOrEqual(64 * 1024)
+  const joined = new Uint8Array(big.length)
+  let off = 0
+  for (const f of frames) {
+    const { ch: id, payload } = decodeBinary(f)
+    expect(id).toBe(ch.id)
+    joined.set(payload, off)
+    off += payload.length
+  }
+  expect(off).toBe(big.length)
+  expect(joined.every((v, i) => v === big[i])).toBe(true)
+})
