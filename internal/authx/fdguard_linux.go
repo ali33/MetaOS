@@ -2,6 +2,7 @@ package authx
 
 import (
 	"os"
+	"sync"
 	"syscall"
 )
 
@@ -12,6 +13,8 @@ func GuardFD(fd int) (func() error, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Không để bản giữ stdout lọt sang tiến trình PAM fork/exec (rò đầu ghi ống frame).
+	syscall.CloseOnExec(saved)
 	null, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
 	if err != nil {
 		syscall.Close(saved)
@@ -22,8 +25,13 @@ func GuardFD(fd int) (func() error, error) {
 		syscall.Close(saved)
 		return nil, err
 	}
+	var once sync.Once
 	return func() error {
-		defer syscall.Close(saved)
-		return syscall.Dup3(saved, fd, 0)
+		var err error
+		once.Do(func() {
+			defer syscall.Close(saved)
+			err = syscall.Dup3(saved, fd, 0)
+		})
+		return err
 	}, nil
 }

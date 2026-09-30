@@ -38,7 +38,7 @@ func TestReadPasswordRejects(t *testing.T) {
 		want error
 	}{
 		"rỗng":        {"\n", ErrPasswordInvalid},
-		"không có \n": {"abc", ErrPasswordInvalid},
+		"không có \\n": {"abc", ErrPasswordInvalid},
 		"có NUL":      {"a\x00b\n", ErrPasswordInvalid},
 		"dài 513":     {strings.Repeat("a", MaxPassword+1) + "\n", ErrPasswordTooLong},
 		"dài 10 KB":   {strings.Repeat("a", 10<<10) + "\n", ErrPasswordTooLong},
