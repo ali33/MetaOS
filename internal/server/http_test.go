@@ -259,3 +259,59 @@ func TestLoginRejectsWrongSchemeOrigin(t *testing.T) {
 		t.Fatal("không được gọi launcher khi Origin sai")
 	}
 }
+
+// doPlain gửi request như tới listener HTTP thường (không TLS) với Host tuỳ ý.
+func (e *testEnv) doPlain(method, path, host, body string, hdr map[string]string) *httptest.ResponseRecorder {
+	r := httptest.NewRequest(method, "http://"+host+path, strings.NewReader(body))
+	r.Host = host
+	if body != "" {
+		r.Header.Set("Content-Type", "application/json")
+	}
+	for k, v := range hdr {
+		r.Header.Set(k, v)
+	}
+	w := httptest.NewRecorder()
+	e.h.ServeHTTP(w, r)
+	return w
+}
+
+// DNS rebinding: trang lạ trỏ tên của nó về 127.0.0.1 thì Origin khớp Host nhưng
+// Host không phải loopback. HTTP thường chỉ chấp nhận Host loopback.
+func TestPlainHTTPLoginRejectsNonLoopbackHost(t *testing.T) {
+	e := newTestServer(t)
+	for _, host := range []string{"evil.example:9090", "evil.example", "10.0.0.5:9090"} {
+		w := e.doPlain("POST", "/api/login", host, `{"user":"alice","password":"Mật khẩu 1"}`, map[string]string{"Origin": "http://" + host})
+		if w.Code != 403 {
+			t.Fatalf("Host %s: muốn 403, nhận %d %s", host, w.Code, w.Body)
+		}
+		w = e.doPlain("POST", "/api/login", host, `{"user":"alice","password":"Mật khẩu 1"}`, nil)
+		if w.Code != 403 {
+			t.Fatalf("Host %s, không Origin: muốn 403, nhận %d %s", host, w.Code, w.Body)
+		}
+	}
+	if e.l.callCount() != 0 {
+		t.Fatal("không được gọi launcher khi Host không phải loopback")
+	}
+}
+
+func TestPlainHTTPLoginAllowsLoopbackHost(t *testing.T) {
+	for _, host := range []string{"127.0.0.1:9090", "localhost:9090", "[::1]:9090", "LOCALHOST"} {
+		e := newTestServer(t)
+		w := e.doPlain("POST", "/api/login", host, `{"user":"alice","password":"Mật khẩu 1"}`, map[string]string{"Origin": "http://" + host})
+		if w.Code != 200 {
+			t.Fatalf("Host %s: muốn 200, nhận %d %s", host, w.Code, w.Body)
+		}
+	}
+}
+
+func TestPlainHTTPWSRejectsNonLoopbackHost(t *testing.T) {
+	e := newTestServer(t)
+	cookie, _ := e.login(t, "alice", "Mật khẩu 1")
+	w := e.doPlain("GET", "/ws", "evil.example:9090", "", map[string]string{
+		"Cookie": cookie, "Origin": "http://evil.example:9090",
+		"Connection": "Upgrade", "Upgrade": "websocket", "Sec-WebSocket-Version": "13", "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==",
+	})
+	if w.Code != 403 {
+		t.Fatalf("muốn 403, nhận %d %s", w.Code, w.Body)
+	}
+}

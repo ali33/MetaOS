@@ -84,10 +84,15 @@ func apiErr(w http.ResponseWriter, code int, e string) {
 	writeJSON(w, code, map[string]string{"error": e})
 }
 
-// sameOrigin: không có Origin (client không phải trình duyệt) thì cho qua;
-// có thì scheme phải khớp listener (https khi TLS, http chỉ khi HTTP thường —
-// Validate chỉ cho HTTP thường trên loopback) và host phải trùng Host của request.
+// sameOrigin: HTTP thường (Validate chỉ cho trên loopback) thì Host phải là
+// loopback — chống DNS rebinding, khi đó Origin của trang lạ khớp Host của chính
+// nó. Rồi: không có Origin (client không phải trình duyệt) thì cho qua; có thì
+// scheme phải khớp listener (https khi TLS, http khi HTTP thường) và host phải
+// trùng Host của request.
 func sameOrigin(r *http.Request) bool {
+	if r.TLS == nil && !loopbackHost(r.Host) {
+		return false
+	}
 	o := r.Header.Get("Origin")
 	if o == "" {
 		return true
@@ -98,6 +103,19 @@ func sameOrigin(r *http.Request) bool {
 	}
 	u, err := url.Parse(o)
 	return err == nil && strings.EqualFold(u.Scheme, scheme) && strings.EqualFold(u.Host, r.Host)
+}
+
+// loopbackHost: tên máy trong Host (bỏ cổng) là localhost hoặc IP loopback.
+func loopbackHost(host string) bool {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func clientIP(r *http.Request) string {
