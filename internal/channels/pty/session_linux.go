@@ -63,9 +63,24 @@ func spared(pid, sid int) bool { return pid != sid && ignoresHUP(pid) }
 // killSession: SIGKILL mọi tiến trình còn trong session trừ những tiến trình
 // được tha (Q3: nohup được sống, giống SSH).
 func killSession(sid int) {
-	for _, pid := range sessionPIDs(sid) {
-		if !spared(pid, sid) {
-			_ = syscall.Kill(pid, syscall.SIGKILL)
+	killPasses(func() []int { return sessionPIDs(sid) }, func(pid int) bool { return spared(pid, sid) },
+		func(pid int) { _ = syscall.Kill(pid, syscall.SIGKILL) })
+}
+
+// killPasses quét rồi giết, lặp tối đa 3 lượt tới khi một lượt quét không còn pid
+// nào giết được: tiến trình fork giữa lúc quét và lúc giết thì con của nó chỉ
+// hiện ở lượt sau.
+func killPasses(scan func() []int, spare func(int) bool, kill func(int)) {
+	for pass := 0; pass < 3; pass++ {
+		n := 0
+		for _, pid := range scan() {
+			if !spare(pid) {
+				kill(pid)
+				n++
+			}
+		}
+		if n == 0 {
+			return
 		}
 	}
 }

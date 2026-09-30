@@ -454,3 +454,22 @@ func TestPtyReattachAfterFinishSendsNothing(t *testing.T) {
 		t.Fatalf("đã gửi đầu ra sau close: %q", out)
 	}
 }
+
+// Tiến trình fork trong lúc chờ KillGrace: con mới không có trong lần quét đầu.
+// killPasses quét lại (tối đa 3 lượt) tới khi không còn pid nào giết được.
+func TestKillPassesRescansForkedChildren(t *testing.T) {
+	scans := [][]int{{10, 11}, {10, 12}, {}} // lượt 2: 12 vừa được 11 fork ra; 10 được tha
+	var killed []int
+	n := 0
+	killPasses(func() []int { s := scans[n]; n++; return s }, func(pid int) bool { return pid == 10 },
+		func(pid int) { killed = append(killed, pid) })
+	if fmt.Sprint(killed) != "[11 12]" || n != 3 {
+		t.Fatalf("killed=%v scans=%d", killed, n)
+	}
+	n, killed = 0, nil
+	forever := func() []int { n++; return []int{99} }
+	killPasses(forever, func(int) bool { return false }, func(pid int) { killed = append(killed, pid) })
+	if n != 3 || len(killed) != 3 {
+		t.Fatalf("tối đa 3 lượt: scans=%d killed=%v", n, killed)
+	}
+}
