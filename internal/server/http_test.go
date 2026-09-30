@@ -1,6 +1,8 @@
 package server
 
 import (
+	"context"
+	"net/http/httptest"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -50,6 +52,7 @@ func TestLoginFailures(t *testing.T) {
 		{"mật khẩu 513 byte", `{"user":"alice","password":"` + strings.Repeat("a", 513) + `"}`, nil, 401, "auth-failed", 0},
 		{"mật khẩu rỗng", `{"user":"alice","password":""}`, nil, 401, "auth-failed", 0},
 		{"khác origin", `{"user":"alice","password":"Mật khẩu 1"}`, map[string]string{"Origin": "https://evil.example"}, 403, "bad-origin", 0},
+		{"mật khẩu 10 KB", `{"user":"alice","password":"` + strings.Repeat("a", 10*1024) + `"}`, nil, 400, "invalid-request", 0},
 		{"JSON hỏng", `{`, nil, 400, "invalid-request", 0},
 	}
 	for _, c := range cases {
@@ -69,17 +72,21 @@ func TestLoginFailures(t *testing.T) {
 func TestLoginRequiresJSONContentType(t *testing.T) {
 	e := newTestServer(t)
 	r := e.do("POST", "/api/login", "", nil)
-	if r.Code != http.StatusUnsupportedMediaType {
-		t.Fatalf("got %d", r.Code)
+	if r.Code != http.StatusUnsupportedMediaType || e.l.callCount() != 0 {
+		t.Fatalf("got %d launches=%d", r.Code, e.l.callCount())
 	}
 }
 
 func TestLoginErrorsFromLauncher(t *testing.T) {
-	for err, want := range map[error]string{ErrPasswordExpired: "password-expired", errors.New("boom"): "internal"} {
+	type want struct {
+		code int
+		e    string
+	}
+	for err, want := range map[error]want{ErrPasswordExpired: {401, "password-expired"}, errors.New("boom"): {500, "internal"}} {
 		e := newTestServer(t)
 		e.l.err = err
 		w := e.do("POST", "/api/login", `{"user":"alice","password":"Mật khẩu 1"}`, nil)
-		if !strings.Contains(w.Body.String(), `"`+want+`"`) || strings.Contains(w.Body.String(), "boom") {
+		if w.Code != want.code || !strings.Contains(w.Body.String(), `"`+want.e+`"`) || strings.Contains(w.Body.String(), "boom") {
 			t.Errorf("%v: %d %s", err, w.Code, w.Body)
 		}
 	}
@@ -152,5 +159,91 @@ func TestStaticAndSPAFallback(t *testing.T) {
 	}
 	if w := e.do("GET", "/assets/khong-co.js", "", nil); w.Code != 404 {
 		t.Fatalf("file có đuôi mà thiếu phải 404: %d", w.Code)
+	}
+}
+
+func TestLoginRootAliasUID0Rejected(t *testing.T) {
+	e := newTestServer(t)
+	e.l.rootUID = true
+	w := e.do("POST", "/api/login", `{"user":"toor","password":"Mật khẩu 1"}`, nil)
+	if w.Code != 403 || !strings.Contains(w.Body.String(), `"root-disabled"`) {
+		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+	if !e.l.lastBridge().isStopped() || e.store.Len() != 0 || len(w.Result().Cookies()) != 0 {
+		t.Fatal("bridge uid 0 phải bị dừng, không tạo phiên")
+	}
+	e = newTestServer(t, func(c *Config) { c.AllowRoot = true })
+	e.l.rootUID = true
+	if w := e.do("POST", "/api/login", `{"user":"toor","password":"Mật khẩu 1"}`, nil); w.Code != 200 {
+		t.Fatalf("có cờ thì phải vào được: %d", w.Code)
+	}
+}
+
+func TestUnknownAPIPathsAre404(t *testing.T) {
+	e := newTestServer(t)
+	for _, p := range []string{"/api/foo", "/api/login/", "/api/"} {
+		w := e.do("GET", p, "", nil)
+		if w.Code != 404 || !strings.Contains(w.Body.String(), `"not-found"`) || strings.Contains(w.Body.String(), "INDEX") {
+			t.Errorf("%s: %d %s", p, w.Code, w.Body)
+		}
+	}
+}
+
+func TestMethodNotAllowed(t *testing.T) {
+	e := newTestServer(t)
+	for _, c := range [][2]string{{"GET", "/api/login"}, {"GET", "/api/logout"}, {"POST", "/api/session"}, {"DELETE", "/api/session"}} {
+		if w := e.do(c[0], c[1], "", nil); w.Code != 405 {
+			t.Errorf("%s %s: %d", c[0], c[1], w.Code)
+		}
+	}
+}
+
+func TestStaticNoDirectoryListing(t *testing.T) {
+	e := newTestServer(t)
+	for _, p := range []string{"/assets", "/assets/"} {
+		if w := e.do("GET", p, "", nil); w.Code != 404 || strings.Contains(w.Body.String(), "app.js") {
+			t.Errorf("%s: %d %s", p, w.Code, w.Body)
+		}
+	}
+}
+
+func TestLoginEndsSessionOfIncomingCookie(t *testing.T) {
+	e := newTestServer(t)
+	cookie, _ := e.login(t, "alice", "Mật khẩu 1")
+	first := e.l.lastBridge()
+	w := e.do("POST", "/api/login", `{"user":"alice","password":"Mật khẩu 1"}`, map[string]string{"Cookie": cookie})
+	if w.Code != 200 || !first.isStopped() || e.store.Len() != 1 {
+		t.Fatalf("%d stopped=%v len=%d", w.Code, first.isStopped(), e.store.Len())
+	}
+	// đăng nhập hỏng thì không đụng tới phiên đang có
+	cookie2 := ""
+	for _, c := range w.Result().Cookies() {
+		cookie2 = c.Name + "=" + c.Value
+	}
+	e.do("POST", "/api/login", `{"user":"alice","password":"sai"}`, map[string]string{"Cookie": cookie2})
+	if e.store.Len() != 1 || e.l.lastBridge().isStopped() {
+		t.Fatal("đăng nhập hỏng không được kết thúc phiên cũ")
+	}
+}
+
+func TestLoginClientGoneEndsNewSession(t *testing.T) {
+	e := newTestServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	e.l.onLaunch = cancel
+	r := httptest.NewRequest("POST", "https://srv1:9443/api/login", strings.NewReader(`{"user":"alice","password":"Mật khẩu 1"}`)).WithContext(ctx)
+	r.Host = "srv1:9443"
+	r.Header.Set("Content-Type", "application/json")
+	e.h.ServeHTTP(httptest.NewRecorder(), r)
+	if e.store.Len() != 0 || !e.l.lastBridge().isStopped() {
+		t.Fatalf("phiên mồ côi: len=%d stopped=%v", e.store.Len(), e.l.lastBridge().isStopped())
+	}
+}
+
+func TestLogoutWithMatchingOrigin(t *testing.T) {
+	e := newTestServer(t)
+	cookie, csrf := e.login(t, "alice", "Mật khẩu 1")
+	w := e.do("POST", "/api/logout", "", map[string]string{"Cookie": cookie, CSRFHeader: csrf, "Origin": "https://srv1:9443"})
+	if w.Code != 204 {
+		t.Fatalf("%d", w.Code)
 	}
 }

@@ -46,6 +46,7 @@ func New(cfg Config, store *Store, l Launcher, static fs.FS, logw io.Writer) *Se
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) { apiErr(w, http.StatusNotFound, "not-found") })
 	mux.HandleFunc("/api/login", s.login)
 	mux.HandleFunc("/api/session", s.sessionInfo)
 	mux.HandleFunc("/api/logout", s.logout)
@@ -132,7 +133,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	ip := clientIP(r)
 	failed := func(code int, e, reason string) {
-		s.log.Printf("login failed user=%q ip=%s reason=%s", req.User, ip, reason)
+		s.log.Printf("login failed user=%q ip=%s reason=%q", req.User, ip, reason)
 		apiErr(w, code, e)
 	}
 	if _, err := authx.ParseArgs([]string{req.User}); err != nil {
@@ -162,10 +163,23 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		failed(http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
+	// Chính sách root theo uid thật, không chỉ theo tên: "toor" cũng là uid 0.
+	if hello.UID == 0 && !s.cfg.AllowRoot {
+		b.Stop()
+		failed(http.StatusForbidden, "root-disabled", "root-disabled")
+		return
+	}
+	if c, err := r.Cookie(CookieName); err == nil {
+		s.store.End(c.Value, "replaced") // không để bridge của phiên cũ mồ côi
+	}
 	sess, err := s.store.Create(req.User, hello.Hostname, b)
 	if err != nil {
 		b.Stop()
 		failed(http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	if r.Context().Err() != nil { // client đã ngắt trong lúc chờ Launch
+		s.store.End(sess.ID, "client-gone")
 		return
 	}
 	s.log.Printf("login ok user=%s ip=%s", req.User, ip)
@@ -175,6 +189,10 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) sessionInfo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		apiErr(w, http.StatusMethodNotAllowed, "invalid-request")
+		return
+	}
 	sess, ok := s.session(r)
 	if !ok {
 		apiErr(w, http.StatusUnauthorized, "no-session")
@@ -210,7 +228,12 @@ func (s *Server) staticHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := strings.TrimPrefix(path.Clean(r.URL.Path), "/")
 		if p != "" {
-			if _, err := fs.Stat(s.static, p); err != nil && !strings.Contains(path.Base(p), ".") {
+			fi, err := fs.Stat(s.static, p)
+			switch {
+			case err == nil && fi.IsDir():
+				http.NotFound(w, r) // không liệt kê thư mục
+				return
+			case err != nil && !strings.Contains(path.Base(p), "."):
 				r = r.Clone(r.Context())
 				r.URL.Path = "/"
 			}

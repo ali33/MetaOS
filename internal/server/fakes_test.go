@@ -91,6 +91,9 @@ type stubLauncher struct {
 	calls  int
 	err    error
 	bridge *fakeBridge
+
+	rootUID  bool   // trả UID 0 dù tên không phải root
+	onLaunch func() // chạy giữa Launch (giả lập client ngắt kết nối)
 }
 
 func (l *stubLauncher) Launch(ctx context.Context, user string, pw []byte) (BridgeConn, protocol.HelloData, error) {
@@ -103,8 +106,15 @@ func (l *stubLauncher) Launch(ctx context.Context, user string, pw []byte) (Brid
 	if string(pw) != "Mật khẩu 1" {
 		return nil, protocol.HelloData{}, ErrAuthFailed
 	}
+	if l.onLaunch != nil {
+		l.onLaunch()
+	}
 	l.bridge = newFakeBridge()
-	return l.bridge, protocol.HelloData{User: user, Hostname: "srv1"}, nil
+	uid := 1000
+	if l.rootUID || user == "root" {
+		uid = 0
+	}
+	return l.bridge, protocol.HelloData{User: user, UID: uid, Hostname: "srv1"}, nil
 }
 
 func (l *stubLauncher) lastBridge() *fakeBridge { l.mu.Lock(); defer l.mu.Unlock(); return l.bridge }
