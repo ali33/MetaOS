@@ -211,3 +211,43 @@ test('F3: channels chứa kênh vừa đóng lúc mất kết nối thì không 
   sockets[1].text({ ch: '', type: 'channels', data: [{ ch: pty.id, kind: 'pty' }, { ch: 'pty.old.1', kind: 'pty' }] })
   expect(orphans).toHaveBeenCalledWith([{ ch: 'pty.old.1', kind: 'pty' }])
 })
+
+test('F3: close trước khi socket mở lần đầu ⇒ không gửi open cũng không gửi close', () => {
+  const { conn, last } = setup()
+  const h = { onClose: vi.fn() }
+  const ch = conn.open('pty', {}, h)
+  ch.close()
+  last().open()
+  expect(last().json()).toEqual([])
+  expect(h.onClose).toHaveBeenCalledWith('closed')
+})
+
+test('F3: close khi mất kết nối gọi onClose("closed")', async () => {
+  const { conn, sockets } = setup()
+  sockets[0].open()
+  const h = { onClose: vi.fn() }
+  const pty = conn.open('pty', {}, h, { reattachable: true })
+  sockets[0].text({ ch: '', type: 'ready', data: { ch: pty.id } })
+  sockets[0].drop()
+  pty.close()
+  expect(h.onClose).toHaveBeenCalledWith('closed')
+})
+
+test('F3: closedSeen được dọn sau khung channels đầu tiên', async () => {
+  const orphans = vi.fn()
+  const sockets: FakeSocket[] = []
+  const conn = new Connection({ url: 'wss://h/ws', socketFactory: () => { const s = new FakeSocket(); sockets.push(s); return s }, onOrphans: orphans })
+  conn.connect()
+  sockets[0].open()
+  const pty = conn.open('pty', {}, {}, { reattachable: true })
+  sockets[0].text({ ch: '', type: 'ready', data: { ch: pty.id } })
+  sockets[0].drop()
+  pty.close()
+  await vi.advanceTimersByTimeAsync(1000)
+  sockets[1].open()
+  sockets[1].text({ ch: '', type: 'channels', data: [] })
+  expect(orphans).not.toHaveBeenCalled()
+  // id không còn được nhớ: nếu bridge liệt kê lại thì là kênh lạ
+  sockets[1].text({ ch: '', type: 'channels', data: [{ ch: pty.id, kind: 'pty' }] })
+  expect(orphans).toHaveBeenCalledWith([{ ch: pty.id, kind: 'pty' }])
+})

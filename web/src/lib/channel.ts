@@ -60,7 +60,7 @@ export class Connection {
   private chans = new Map<string, Channel>()
   // Kênh đã đóng khi socket chưa mở: gửi close cho bridge ngay khi nối lại, và không báo là kênh lạ.
   private closedIds = new Set<string>()
-  // Cùng các id đó nhưng giữ đến khi bridge thôi liệt kê chúng trong `channels` (đã gửi close vẫn có thể còn trong danh sách).
+  // Cùng các id đó nhưng giữ đến khung `channels` đầu tiên sau khi nối lại (đã gửi close vẫn có thể còn trong danh sách).
   private closedSeen = new Set<string>()
   private attempt = 0
   private timer: ReturnType<typeof setTimeout> | null = null
@@ -149,10 +149,14 @@ export class Connection {
       this.sendRaw(JSON.stringify({ ch: '', type: 'close', data: { ch: ch.id } }))
       return
     }
-    // Socket chưa mở: bỏ kênh ngay để không gắn lại, nhớ id để đóng phía bridge khi nối lại.
+    // Socket chưa mở: bỏ kênh ngay để không gắn lại. Chỉ khi bridge có thể đã biết kênh
+    // (từng ready hoặc đang gắn lại) mới nhớ id để đóng phía bridge khi nối lại.
     this.chans.delete(ch.id)
-    this.closedIds.add(ch.id)
-    this.closedSeen.add(ch.id)
+    if (ch.ready || ch.reattaching) {
+      this.closedIds.add(ch.id)
+      this.closedSeen.add(ch.id)
+    }
+    ch.h.onClose?.('closed')
   }
 
   private sendOpen(ch: Channel) {
@@ -211,9 +215,8 @@ export class Connection {
         return
       case 'channels': {
         const list = (Array.isArray(m.data) ? m.data : []) as { ch: string; kind: string }[]
-        const listed = new Set(list.map((c) => c.ch))
-        for (const id of this.closedSeen) if (!listed.has(id) && !this.closedIds.has(id)) this.closedSeen.delete(id)
         const unknown = list.filter((c) => !this.chans.has(c.ch) && !this.closedSeen.has(c.ch))
+        this.closedSeen.clear() // chỉ cần cho khung channels đầu tiên sau khi nối lại
         if (unknown.length) this.o.onOrphans?.(unknown)
         return
       }
