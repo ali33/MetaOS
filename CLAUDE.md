@@ -12,7 +12,7 @@ Nguồn sự thật về tiến độ và phản hồi của tester. Quy trình 
 
 - Sheet: **"[X] MetaOS"** — https://docs.google.com/spreadsheets/d/1pIaFPXpWtPoOLYjyaM_I-ZIf8DzfQjd0aURTUt8FG7I/edit?gid=0#gid=0
 - File id: `1pIaFPXpWtPoOLYjyaM_I-ZIf8DzfQjd0aURTUt8FG7I`
-- Tab `Công việc` (trước đây tên `Sheet1`): gid `0` · mã `M0-xx`…`M5-xx`, dòng tổng `M2`…`M5`, `X` sau MVP, `TD-xx` tồn đọng
+- Tab `Công việc`: gid `0` — sheet cũ tên `Sheet1`, 13 cột A–M; nếu vẫn còn tên `Sheet1` hoặc chưa có cột N `Phản hồi` thì chưa nâng cấp (skill §5b) · mã `M0-xx`…`M5-xx`, dòng tổng `M2`…`M5`, `X` sau MVP, `TD-xx` tồn đọng
 - Tab `Phản hồi`: gid `<chưa có — điền sau khi tạo tab>` · mã `PH-001`…
 - Chủ dự án (duyệt đề xuất, quyết định): `Chủ dự án` (chưa có họ tên — điền khi người dùng cho biết)
 - Tester: chưa có
