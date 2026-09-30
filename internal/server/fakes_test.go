@@ -76,7 +76,11 @@ func (b *fakeBridge) Stop() {
 		close(b.done)
 	})
 }
-func (b *fakeBridge) setBeforeSend(h func(protocol.Frame)) { b.mu.Lock(); b.beforeSend = h; b.mu.Unlock() }
+func (b *fakeBridge) setBeforeSend(h func(protocol.Frame)) {
+	b.mu.Lock()
+	b.beforeSend = h
+	b.mu.Unlock()
+}
 func (b *fakeBridge) isStopped() bool { b.mu.Lock(); defer b.mu.Unlock(); return b.stopped }
 
 // controls trả các type điều khiển (ch rỗng) đã gửi xuống, theo thứ tự.

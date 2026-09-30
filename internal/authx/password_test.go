@@ -37,11 +37,11 @@ func TestReadPasswordRejects(t *testing.T) {
 		in   string
 		want error
 	}{
-		"rỗng":        {"\n", ErrPasswordInvalid},
+		"rỗng":         {"\n", ErrPasswordInvalid},
 		"không có \\n": {"abc", ErrPasswordInvalid},
-		"có NUL":      {"a\x00b\n", ErrPasswordInvalid},
-		"dài 513":     {strings.Repeat("a", MaxPassword+1) + "\n", ErrPasswordTooLong},
-		"dài 10 KB":   {strings.Repeat("a", 10<<10) + "\n", ErrPasswordTooLong},
+		"có NUL":       {"a\x00b\n", ErrPasswordInvalid},
+		"dài 513":      {strings.Repeat("a", MaxPassword+1) + "\n", ErrPasswordTooLong},
+		"dài 10 KB":    {strings.Repeat("a", 10<<10) + "\n", ErrPasswordTooLong},
 	}
 	for name, c := range cases {
 		if _, err := ReadPassword(strings.NewReader(c.in)); !errors.Is(err, c.want) {
