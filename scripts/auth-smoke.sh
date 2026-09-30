@@ -39,5 +39,10 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
   [ "$rc" = 4 ] || { echo "FAIL hết hạn phải rc=4, nhận $rc"; exit 1; }
   rc=0; printf "pw-dave\n" | $AS_METAOS $A --check-only dave >/dev/null 2>&1 || rc=$?
   [ "$rc" = 1 ] || { echo "FAIL bị khoá phải rc=1, nhận $rc"; exit 1; }
+  # stdin hỏng (đọc thư mục ⇒ EISDIR) là lỗi hạ tầng (3), không phải sai mật khẩu; stdin rỗng vẫn là 1.
+  rc=0; $AS_METAOS $A --check-only alice </ >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 3 ] || { echo "FAIL stdin lỗi đọc phải rc=3, nhận $rc"; exit 1; }
+  rc=0; $AS_METAOS $A --check-only alice </dev/null >/dev/null 2>&1 || rc=$?
+  [ "$rc" = 1 ] || { echo "FAIL stdin rỗng phải rc=1, nhận $rc"; exit 1; }
   echo "SMOKE OK"
 '

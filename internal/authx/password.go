@@ -9,10 +9,8 @@ import (
 
 const MaxPassword = 512
 
-var (
-	ErrPasswordInvalid = errors.New("password: empty, unterminated or contains NUL")
-	ErrPasswordTooLong = errors.New("password: too long")
-)
+var ErrPasswordInvalid = errors.New("password: empty, unterminated or contains NUL")
+var ErrPasswordTooLong = errors.New("password: too long")
 
 // ReadPassword đọc từng byte tới '\n' đầu tiên. Không bao giờ đọc quá '\n',
 // vì phần sau của stdin là luồng frame dành cho metaos-bridge.

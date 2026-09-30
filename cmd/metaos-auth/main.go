@@ -49,8 +49,10 @@ func run() int {
 		return fail(exitInternal, "guard stdout: %v", err)
 	}
 	pw, err := authx.ReadPassword(os.Stdin)
-	if err != nil {
+	if err == authx.ErrPasswordInvalid || err == authx.ErrPasswordTooLong {
 		return fail(exitAuth, "%v", err)
+	} else if err != nil { // stdin hỏng là lỗi hạ tầng, không phải sai mật khẩu
+		return fail(exitInternal, "read password: %v", err)
 	}
 	code, rc := pamCheck(args.User, pw)
 	authx.Wipe(pw)
