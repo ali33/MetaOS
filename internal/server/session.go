@@ -31,6 +31,8 @@ type Session struct {
 	created    time.Time
 	lastActive time.Time
 	onEnd      []func(string)
+	ended      bool
+	endReason  string
 }
 
 func (s *Session) CheckCSRF(token string) bool {
@@ -39,6 +41,12 @@ func (s *Session) CheckCSRF(token string) bool {
 
 func (s *Session) OnEnd(f func(reason string)) {
 	s.mu.Lock()
+	if s.ended {
+		reason := s.endReason
+		s.mu.Unlock()
+		f(reason)
+		return
+	}
 	s.onEnd = append(s.onEnd, f)
 	s.mu.Unlock()
 }
@@ -120,6 +128,7 @@ func (st *Store) End(id, reason string) {
 	s.mu.Lock()
 	hooks := s.onEnd
 	s.onEnd = nil
+	s.ended, s.endReason = true, reason
 	s.mu.Unlock()
 	for _, f := range hooks {
 		f(reason)

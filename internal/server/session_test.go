@@ -143,3 +143,41 @@ func TestSessionCSRF(t *testing.T) {
 		t.Fatal("CheckCSRF sai")
 	}
 }
+
+func TestSessionOnEndAfterEnd(t *testing.T) {
+	st, _ := newTestStore()
+	s, _ := st.Create("alice", "h", newFakeBridge())
+	st.End(s.ID, "logout")
+	var reasons []string
+	s.OnEnd(func(r string) { reasons = append(reasons, r) })
+	if len(reasons) != 1 || reasons[0] != "logout" {
+		t.Fatalf("reasons=%v", reasons)
+	}
+}
+
+func TestSessionAbsoluteMaxWithoutTouch(t *testing.T) {
+	c := newFakeClock()
+	st := NewStore(c, time.Hour, 2*time.Hour) // idle > max: chỉ max có thể cắt
+	s, _ := st.Create("alice", "h", newFakeBridge())
+	c.Advance(time.Hour - time.Second)
+	if _, ok := st.Get(s.ID); !ok {
+		t.Fatal("chưa tới max phải còn")
+	}
+	c.Advance(time.Second)
+	if _, ok := st.Get(s.ID); ok {
+		t.Fatal("đúng max phải hết hạn")
+	}
+}
+
+func TestSessionIdleBoundary(t *testing.T) {
+	st, clk := newTestStore()
+	s, _ := st.Create("alice", "h", newFakeBridge())
+	clk.Advance(30*time.Minute - time.Second)
+	if _, ok := st.Get(s.ID); !ok {
+		t.Fatal("29m59s phải còn")
+	}
+	clk.Advance(time.Second)
+	if _, ok := st.Get(s.ID); ok {
+		t.Fatal("đúng 30m phải hết hạn")
+	}
+}
