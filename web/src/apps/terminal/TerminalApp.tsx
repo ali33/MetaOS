@@ -16,17 +16,21 @@ export function TerminalApp(p: AppProps) {
   const [tabs, setTabs] = useState<Tab[]>(() => [{ key: ++tabSeq, title: 'Terminal', adopt: p.adopt }])
   const [active, setActive] = useState(tabs[0].key)
 
+  const tabsRef = useRef(tabs)
+  tabsRef.current = tabs
   const addTab = () => {
     const t = { key: ++tabSeq, title: 'Terminal' }
+    tabsRef.current = [...tabsRef.current, t]
     setTabs((ts) => [...ts, t])
     setActive(t.key)
   }
-  const tabsRef = useRef(tabs)
-  tabsRef.current = tabs
   const removeTab = (key: number) => {
+    // Ref cập nhật ngay để hai lần thoát trong cùng một nhịp không "hồi sinh" tab.
     const rest = tabsRef.current.filter((t) => t.key !== key)
+    if (rest.length === tabsRef.current.length) return
+    tabsRef.current = rest
     if (rest.length === 0) return p.requestClose()
-    setTabs(rest)
+    setTabs((ts) => ts.filter((t) => t.key !== key))
     setActive((a) => (a === key ? rest[rest.length - 1].key : a))
   }
   const activeTitle = tabs.find((t) => t.key === active)?.title ?? 'Terminal'
@@ -36,7 +40,10 @@ export function TerminalApp(p: AppProps) {
     <div className="term-app">
       <div className="term-tabs" role="tablist">
         {tabs.map((t) => (
-          <button key={t.key} role="tab" aria-selected={t.key === active} onClick={() => setActive(t.key)}>{t.title}</button>
+          <span key={t.key} className="tab-wrap">
+            <button role="tab" aria-selected={t.key === active} onClick={() => setActive(t.key)}>{t.title}</button>
+            <button className="x" aria-label="Đóng tab" title="Đóng tab" onClick={() => removeTab(t.key)}>×</button>
+          </span>
         ))}
         <button className="add" aria-label="Tab mới" title="Tab mới (Ctrl+Shift+T)" onClick={addTab}>+</button>
       </div>
@@ -80,18 +87,32 @@ function TermTab({ app, adopt, visible, onTitle, onExit, onNewTab }: TabProps) {
         cb.current.report('warn', `Không đo được cỡ terminal: ${(e as Error).message}`)
       }
     }
+    let disposed = false
+    let ready = false
+    let reattaching = false
     let received = 0 // tổng byte đầu ra đã nhận — gửi lên khi gắn lại
     safeFit()
     const handlers: ChannelHandlers = {
-      onReady: () => setPhase('ready'),
-      onReattach: () => { setPhase('reattaching'); return { offset: received } },
+      onReady: () => {
+        ready = true
+        setPhase('ready')
+        if (reattaching) { // cỡ có thể đã đổi trong lúc rời
+          reattaching = false
+          safeFit()
+          ch.sendText('resize', { cols: term.cols, rows: term.rows })
+        }
+      },
+      onReattach: () => { reattaching = true; setPhase('reattaching'); return { offset: received } },
       onText: (m) => {
         if (m.type !== 'replay') return
         if (m.data?.reset) term.reset()
         received = m.data?.offset ?? 0
       },
-      onBinary: (d) => { received += d.length; term.write(d) },
-      onError: (code, message) => cb.current.report('error', `${code}: ${message}`),
+      onBinary: (d) => { received += d.length; if (!disposed) term.write(d) },
+      onError: (code, message) => {
+        if (!ready) setPhase('closed') // mở lỗi: kênh đã bị bỏ, không còn gì để chờ
+        cb.current.report('error', `${code}: ${message}`)
+      },
       onClose: (reason, code) => {
         setPhase('closed')
         if (reason === 'exit') return cb.current.onExit()
@@ -114,8 +135,9 @@ function TermTab({ app, adopt, visible, onTitle, onExit, onNewTab }: TabProps) {
     ]
     term.attachCustomKeyEventHandler((e) => {
       if (e.type !== 'keydown' || !e.ctrlKey || !e.shiftKey) return true
-      if (e.key === 'T') { cb.current.onNewTab(); return false }
-      if (e.key === 'F') { setSearchOpen((v) => !v); return false }
+      const k = e.key.toLowerCase()
+      if (k === 't') { cb.current.onNewTab(); return false }
+      if (k === 'f') { setSearchOpen((v) => !v); return false }
       return true
     })
     let last = { cols: term.cols, rows: term.rows }
@@ -133,6 +155,7 @@ function TermTab({ app, adopt, visible, onTitle, onExit, onNewTab }: TabProps) {
     ro.observe(host.current!)
     api.current = { term, fit, search }
     return () => {
+      disposed = true
       clearTimeout(timer)
       ro.disconnect()
       subs.forEach((s) => s.dispose())

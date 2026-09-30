@@ -124,3 +124,44 @@ test('lỗi mở kênh và mất phiên sau 60 giây lên băng đỏ', () => {
   act(() => again.opened[0].h.onClose!('gone'))
   expect(again.props.report).toHaveBeenCalledWith('error', expect.stringContaining('60 giây'))
 })
+
+test('mở lỗi thì không còn phủ mờ treo; băng đỏ vẫn còn', () => {
+  const { opened, container, props } = setup()
+  act(() => opened[0].h.onError!('invalid-params', 'x'))
+  expect(container.querySelector('.phu-lop')).toBeNull()
+  expect(props.report).toHaveBeenCalledWith('error', 'invalid-params: x')
+})
+
+test('nút đóng tab bỏ tab và đóng kênh của nó', () => {
+  const { opened, props } = setup()
+  fireEvent.click(screen.getByLabelText('Tab mới'))
+  fireEvent.click(screen.getAllByLabelText('Đóng tab')[1])
+  expect(screen.getAllByRole('tab')).toHaveLength(1)
+  expect(opened[1].ch.close).toHaveBeenCalled()
+  expect(opened[0].ch.close).not.toHaveBeenCalled()
+  expect(props.requestClose).not.toHaveBeenCalled()
+})
+
+test('hai tab thoát cùng một nhịp: đóng cửa sổ, không hồi sinh tab', () => {
+  const { opened, props } = setup()
+  fireEvent.click(screen.getByLabelText('Tab mới'))
+  act(() => { opened[0].h.onClose!('exit', 0); opened[1].h.onClose!('exit', 0) })
+  expect(props.requestClose).toHaveBeenCalledTimes(1)
+})
+
+test('gắn lại xong thì gửi lại cỡ hiện tại', () => {
+  const { opened } = setup()
+  act(() => opened[0].h.onReady!())
+  expect(opened[0].ch.sendText).not.toHaveBeenCalled()
+  act(() => { opened[0].h.onReattach!() })
+  terms[0].cols = 100; terms[0].rows = 30
+  act(() => opened[0].h.onReady!())
+  expect(opened[0].ch.sendText).toHaveBeenCalledWith('resize', { cols: 100, rows: 30 })
+})
+
+test('không ghi vào xterm sau khi gỡ', () => {
+  const { opened, unmount } = setup()
+  unmount()
+  opened[0].h.onBinary!(new Uint8Array(3))
+  expect(terms[0].written).toHaveLength(0)
+})
