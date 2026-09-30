@@ -114,3 +114,33 @@ test('đóng bằng nút ✕ của khung: cửa sổ mở lại không thừa h�
   fireEvent.keyDown(window, { key: 't', ctrlKey: true, altKey: true })
   expect(screen.queryByRole('alert')).toBeNull()
 })
+
+test('I2: 4401 "logout" tới khi đang đăng xuất ⇒ chỉ "Đã đăng xuất.", không bao giờ báo hết hạn', async () => {
+  let resolve!: (r: Response) => void
+  vi.stubGlobal('fetch', vi.fn().mockReturnValue(new Promise<Response>((r) => { resolve = r })))
+  const notices: string[] = []
+  const s = openSocket()
+  renderDesktop({
+    connOptions: { socketFactory: s.factory },
+    onLoggedOut: () => notices.push('Đã đăng xuất.'),
+    onExpired: () => notices.push('Phiên đã hết hạn. Hãy đăng nhập lại.'),
+  })
+  s.open()
+  fireEvent.click(screen.getByText('alice ▾'))
+  fireEvent.click(screen.getByText('Đăng xuất'))
+  act(() => s.get().onclose({ code: 4401, reason: 'logout' })) // máy chủ đóng WS trước khi trả 204
+  expect(notices).toEqual([])
+  await act(async () => { resolve(new Response(null, { status: 204 })) })
+  await waitFor(() => expect(notices).toEqual(['Đã đăng xuất.']))
+})
+
+test('I2: 4401 "logout" do tab khác đăng xuất ⇒ onLoggedOut, không onExpired', () => {
+  const s = openSocket()
+  const onExpired = vi.fn()
+  const onLoggedOut = vi.fn()
+  renderDesktop({ connOptions: { socketFactory: s.factory }, onExpired, onLoggedOut })
+  s.open()
+  act(() => s.get().onclose({ code: 4401, reason: 'logout' }))
+  expect(onLoggedOut).toHaveBeenCalledOnce()
+  expect(onExpired).not.toHaveBeenCalled()
+})

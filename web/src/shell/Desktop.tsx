@@ -26,6 +26,7 @@ let winSeq = 0
 export function Desktop({ session, apps = APPS, connOptions, globalBanners, onLoggedOut, onExpired }: Props) {
   const [connState, setConnState] = useState<ConnState>('connecting')
   const launchRef = useRef<(appId: string, adopt?: string) => void>(() => {})
+  const loggingOutRef = useRef(false)
   const conn = useMemo(() => new Connection({
     checkSession: async () => (await currentSession()) !== null,
     onControlError: (code, msg) => globalBanners.add('warn', `${code}: ${msg}`),
@@ -37,7 +38,12 @@ export function Desktop({ session, apps = APPS, connOptions, globalBanners, onLo
   useEffect(() => { conn.connect(); return () => conn.dispose() }, [conn])
 
   useEffect(() => {
-    if (connState === 'expired') onExpired()
+    if (connState === 'expired') {
+      // I2: máy chủ đóng WS 4401 "logout" trước khi trả 204 — đang đăng xuất thì để doLogout báo;
+      // tab khác đăng xuất thì báo đã đăng xuất, không phải hết hạn.
+      if (loggingOutRef.current) return
+      if (conn.endReason === 'logout') { conn.dispose(); onLoggedOut() } else onExpired()
+    }
     if (connState === 'replaced') globalBanners.add('warn', 'Đã mở ở nơi khác. Tải lại trang để dùng ở đây.')
   }, [connState]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -109,20 +115,24 @@ export function Desktop({ session, apps = APPS, connOptions, globalBanners, onLo
   const [loggingOut, setLoggingOut] = useState(false)
   async function doLogout() {
     if (loggingOut) return
+    loggingOutRef.current = true
     setLoggingOut(true)
     try {
       await logout(session.csrf)
       conn.dispose()
       onLoggedOut()
     } catch (e) {
-      if (e instanceof ApiError && e.status === 401) { // phiên đã mất sẵn: coi như đã đăng xuất
+      // phiên đã mất sẵn (401) hoặc máy chủ đã đóng WS 4401 "logout": coi như đã đăng xuất
+      if ((e instanceof ApiError && e.status === 401) || (conn.state === 'expired' && conn.endReason === 'logout')) {
         conn.dispose()
         onLoggedOut()
         return
       }
       console.error(e)
       globalBanners.add('error', `Đăng xuất không thành công: ${(e as Error).message}`)
+      loggingOutRef.current = false
       setLoggingOut(false)
+      if (conn.state === 'expired') onExpired() // 4401 khác "logout" tới trong lúc chờ
     }
   }
 

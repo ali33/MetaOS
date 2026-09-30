@@ -284,3 +284,15 @@ test('I1: gắn lại bị error/close thì không còn chặn frame nhị phân
   last().bin(pty.id, 'sau lỗi')
   expect(got).toEqual(['sau lỗi'])
 })
+
+test('I2: 4401 chuyển kèm lý do đóng', () => {
+  const reasons: (string | undefined)[] = []
+  const sockets: FakeSocket[] = []
+  const conn = new Connection({ url: 'wss://h/ws', socketFactory: () => { const s = new FakeSocket(); sockets.push(s); return s }, onState: (_s, r) => reasons.push(r) })
+  conn.connect()
+  sockets[0].open()
+  sockets[0].drop(4401, 'logout')
+  expect(conn.state).toBe('expired')
+  expect(conn.endReason).toBe('logout')
+  expect(reasons.at(-1)).toBe('logout')
+})

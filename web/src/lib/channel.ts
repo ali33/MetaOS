@@ -28,7 +28,8 @@ export interface ConnOptions {
   url?: string
   socketFactory?: (url: string) => WebSocketLike
   checkSession?: () => Promise<boolean>
-  onState?(s: ConnState): void
+  // reason: lý do máy chủ gửi kèm mã 4401 ("logout", "expired", "shutdown"), rỗng nếu không có.
+  onState?(s: ConnState, reason?: string): void
   onControlError?(code: string, message: string): void
   onOrphans?(list: { ch: string; kind: string }[]): void
 }
@@ -59,6 +60,7 @@ export class Channel {
 
 export class Connection {
   state: ConnState = 'connecting'
+  endReason = '' // lý do kèm 4401 khi state === 'expired'
   private sock: WebSocketLike | null = null
   private chans = new Map<string, Channel>()
   // Kênh đã đóng khi socket chưa mở: gửi close cho bridge ngay khi nối lại, và không báo là kênh lạ.
@@ -76,10 +78,11 @@ export class Connection {
     this.factory = o.socketFactory ?? ((u) => new WebSocket(u) as unknown as WebSocketLike)
   }
 
-  private setState(s: ConnState) {
+  private setState(s: ConnState, reason = '') {
     if (this.state === s) return
     this.state = s
-    this.o.onState?.(s)
+    this.endReason = reason
+    this.o.onState?.(s, reason)
   }
 
   connect() {
@@ -102,7 +105,7 @@ export class Connection {
       if (this.sock !== s) return
       this.sock = null
       if (e.code === CLOSE_REPLACED) return this.setState('replaced')
-      if (e.code === CLOSE_SESSION_ENDED) return this.setState('expired')
+      if (e.code === CLOSE_SESSION_ENDED) return this.setState('expired', e.reason)
       for (const ch of [...this.chans.values()]) {
         if (ch.reattachable && ch.ready) continue
         this.chans.delete(ch.id)
