@@ -1,0 +1,6 @@
+{
+  "name": "metaos-e2e",
+  "private": true,
+  "type": "module",
+  "devDependencies": { "@playwright/test": "^1.55.0" }
+}
