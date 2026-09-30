@@ -359,3 +359,29 @@ func TestStaleDetachedNeverFollowsAttached(t *testing.T) {
 		t.Fatalf("thứ tự điều khiển sai: %s", got)
 	}
 }
+
+// Trình duyệt không được giả frame điều khiển chỉ dành cho ws↔bridge: bỏ, không chuyển.
+func TestWSDropsBrowserWSOnlyControls(t *testing.T) {
+	l := newLive(t)
+	cookie, _ := l.loginLive(t)
+	c := l.mustDial(t, cookie)
+	defer c.CloseNow()
+	b := l.l.lastBridge()
+	waitUntil(t, "attached", func() bool { return strings.Join(b.controls(), ",") == "attached" })
+	ctx, cancel := readCtx()
+	defer cancel()
+	for _, typ := range []string{"detached", "attached", "hello"} {
+		if err := c.Write(ctx, websocket.MessageText, []byte(`{"ch":"","type":"`+typ+`"}`)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = c.Write(ctx, websocket.MessageText, []byte(`{"ch":"","type":"ping"}`))
+	// frame bình thường sau đó vẫn đi: dội lại qua fakeBridge để biết các frame trước đã được xử lý
+	_ = c.Write(ctx, websocket.MessageText, []byte(`{"ch":"a","type":"resize"}`))
+	if _, data, err := c.Read(ctx); err != nil || string(data) != `{"ch":"a","type":"resize"}` {
+		t.Fatalf("frame thường phải vẫn đi: %v %q", err, data)
+	}
+	if got := strings.Join(b.controls(), ","); got != "attached,ping" {
+		t.Fatalf("bridge nhận điều khiển: %s", got)
+	}
+}

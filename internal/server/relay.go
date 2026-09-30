@@ -67,6 +67,19 @@ func control(typ string) protocol.Frame {
 	return protocol.Frame{Kind: protocol.KindText, Data: b}
 }
 
+// wsOnlyControl: frame text ch rỗng có type chỉ dành cho ws↔bridge.
+func wsOnlyControl(data []byte) (string, bool) {
+	m, err := protocol.DecodeMessage(data)
+	if err != nil || m.Ch != "" {
+		return "", false
+	}
+	switch m.Type {
+	case protocol.TypeDetached, protocol.TypeAttached, protocol.TypeHello:
+		return m.Type, true
+	}
+	return "", false
+}
+
 func (s *Server) ws(w http.ResponseWriter, r *http.Request) {
 	sess, ok := s.session(r)
 	if !ok {
@@ -155,6 +168,10 @@ func (s *Server) ws(w http.ResponseWriter, r *http.Request) {
 		kind := protocol.KindText
 		if typ == websocket.MessageBinary {
 			kind = protocol.KindBinary
+		} else if t, ok := wsOnlyControl(data); ok {
+			// Chỉ ws được gửi các điều khiển này xuống bridge; trình duyệt gửi là lỗi client.
+			s.log.Printf("ws user=%s: bỏ frame điều khiển %q từ trình duyệt", sess.User, t)
+			continue
 		}
 		if err := sess.Bridge.Send(protocol.Frame{Kind: kind, Data: data}); err != nil {
 			break
