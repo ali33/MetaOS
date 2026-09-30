@@ -1,0 +1,14 @@
+.term-app { display: flex; flex-direction: column; flex: 1; min-height: 0; background: #1e1e1e; }
+.term-tabs { display: flex; align-items: center; gap: 2px; background: var(--surface-2); padding: 2px 4px; flex: none; }
+.term-tabs [role="tab"] { border: 0; background: none; padding: 4px 10px; border-radius: 6px; max-width: 200px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.term-tabs [role="tab"][aria-selected="true"] { background: var(--surface); font-weight: 600; }
+.term-tabs .add { border: 0; background: none; width: 28px; height: 28px; border-radius: 50%; }
+.term-pane { position: relative; flex: 1; min-height: 0; padding: 4px; }
+.term-pane .xterm-host { position: absolute; inset: 4px; }
+.term-search { position: absolute; top: 6px; right: 12px; z-index: 6; display: flex; gap: 4px; background: var(--surface);
+  padding: 4px; border-radius: 6px; box-shadow: var(--shadow); }
+.term-app .phu-lop { color: #fff; background: rgba(0, 0, 0, .55); }
+.term-tabs .tab-wrap { display: inline-flex; align-items: center; }
+.term-tabs .x { border: 0; background: none; width: 20px; height: 20px; border-radius: 50%; padding: 0; opacity: .6; }
+.term-tabs .x:hover { opacity: 1; }
