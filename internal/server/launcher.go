@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ali33/MetaOS/internal/authx"
 	"github.com/ali33/MetaOS/internal/protocol"
 )
 
@@ -49,7 +50,18 @@ type procBridge struct {
 	done     chan struct{}
 	exitErr  error
 	stopOnce sync.Once
+	stopped  chan struct{} // đóng khi dừng: vòng đọc bỏ frame thay vì chờ người đọc Frames()
+	sigOnce  sync.Once
 	log      *log.Logger
+}
+
+// signalStop đóng stdin (bridge gặp EOF sẽ tự thoát) và báo vòng đọc bỏ các
+// frame còn lại, để nó đọc cạn tới EOF rồi Wait và đóng done.
+func (b *procBridge) signalStop() {
+	b.sigOnce.Do(func() {
+		close(b.stopped)
+		b.stdin.Close()
+	})
 }
 
 func (b *procBridge) Send(f protocol.Frame) error {
@@ -66,7 +78,7 @@ func (b *procBridge) Done() <-chan struct{}         { return b.done }
 // Đóng pipe đang được ghi dở là an toàn — Write đang chặn sẽ trả lỗi.
 func (b *procBridge) Stop() {
 	b.stopOnce.Do(func() {
-		b.stdin.Close()
+		b.signalStop()
 		select {
 		case <-b.done:
 		case <-time.After(StopWait):
@@ -77,6 +89,9 @@ func (b *procBridge) Stop() {
 
 func (l *AuthLauncher) Launch(ctx context.Context, user string, password []byte) (BridgeConn, protocol.HelloData, error) {
 	var hello protocol.HelloData
+	if len(password) > authx.MaxPassword {
+		return nil, hello, ErrAuthFailed // như sai mật khẩu; không khởi chạy metaos-auth
+	}
 	cmd := l.Command(user)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -101,7 +116,9 @@ func (l *AuthLauncher) Launch(ctx context.Context, user string, password []byte)
 			l.Log.Printf("auth[%s]: %s", user, sc.Text())
 		}
 	}()
-	b := &procBridge{cmd: cmd, stdin: stdin, frames: make(chan protocol.Frame, 64), done: make(chan struct{}), log: l.Log}
+	timer := time.NewTimer(l.HelloTimeout) // tính cả thời gian ghi mật khẩu
+	defer timer.Stop()
+	b := &procBridge{cmd: cmd, stdin: stdin, frames: make(chan protocol.Frame, 64), done: make(chan struct{}), stopped: make(chan struct{}), log: l.Log}
 	first := make(chan protocol.Frame, 1)
 	go func() {
 		defer close(b.frames)
@@ -116,7 +133,10 @@ func (l *AuthLauncher) Launch(ctx context.Context, user string, password []byte)
 				first <- f
 				continue
 			}
-			b.frames <- f
+			select {
+			case b.frames <- f:
+			case <-b.stopped: // đã dừng, không còn ai đọc: bỏ frame, tiếp tục đọc cạn
+			}
 		}
 		<-stderrDone // Wait đóng các pipe; đọc hết stderr trước để không mất dòng log cuối
 		b.exitErr = cmd.Wait()
@@ -130,10 +150,8 @@ func (l *AuthLauncher) Launch(ctx context.Context, user string, password []byte)
 	if werr != nil {
 		l.Log.Printf("ghi mật khẩu cho %s: %v", user, werr)
 	}
-	timer := time.NewTimer(l.HelloTimeout)
-	defer timer.Stop()
 	fail := func(e error) (BridgeConn, protocol.HelloData, error) {
-		stdin.Close()
+		b.signalStop()
 		_ = cmd.Process.Kill() // còn là metaos-auth (ruid = metaos) nên kill được; đã là bridge thì EPERM, đóng stdin là đủ
 		return nil, protocol.HelloData{}, e
 	}

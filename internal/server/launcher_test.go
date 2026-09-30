@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ali33/MetaOS/internal/authx"
 	"github.com/ali33/MetaOS/internal/protocol"
 )
 
@@ -56,6 +57,17 @@ func TestHelperAuth(t *testing.T) {
 	case "stuck": // chào xong rồi không bao giờ đọc stdin nữa
 		hello(os.Getenv("METAOS_FAKE_USER"))
 		time.Sleep(time.Hour)
+	case "flood": // như bridge lúc đăng xuất: stdin EOF ⇒ xả một loạt frame rồi thoát
+		hello(os.Getenv("METAOS_FAKE_USER"))
+		_, _ = io.Copy(io.Discard, in)
+		for i := 0; i < 200; i++ {
+			_ = protocol.WritePipeFrame(os.Stdout, protocol.Frame{Kind: protocol.KindBinary, Data: []byte{1, 'a', byte(i)}})
+		}
+		os.Exit(0)
+	case "exit2":
+		os.Exit(2)
+	case "exit3":
+		os.Exit(3)
 	}
 	os.Exit(0)
 }
@@ -106,6 +118,8 @@ func TestLaunchErrors(t *testing.T) {
 		"garbage":   ErrLaunch, // Review Focus #3: rác trên stdout không được làm treo
 		"hang":      ErrLaunch,
 		"wronguser": ErrLaunch,
+		"exit2":     ErrLaunch, // người gọi / đối số không hợp lệ
+		"exit3":     ErrLaunch, // lỗi nội bộ của metaos-auth
 	}
 	for mode, want := range cases {
 		start := time.Now()
@@ -130,18 +144,81 @@ func TestStopDoesNotWaitForBlockedSend(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = b.(*procBridge).cmd.Process.Kill() })
+	sendErr := make(chan error, 1)
 	go func() {
 		chunk := make([]byte, protocol.MaxFrame)
-		for b.Send(protocol.Frame{Kind: protocol.KindBinary, Data: chunk}) == nil {
+		var err error
+		for err == nil {
+			err = b.Send(protocol.Frame{Kind: protocol.KindBinary, Data: chunk})
 		}
+		sendErr <- err
 	}()
 	time.Sleep(300 * time.Millisecond) // đủ để pipe đầy và Send chặn
+	select {
+	case err := <-sendErr:
+		t.Fatalf("Send phải đang chặn, nhưng đã trả %v", err)
+	default:
+	}
 	stopped := make(chan struct{})
 	go func() { b.Stop(); close(stopped) }()
 	select {
 	case <-stopped:
 	case <-time.After(3 * time.Second):
 		t.Fatal("Stop treo khi Send đang chặn")
+	}
+	select {
+	case err := <-sendErr:
+		if err == nil {
+			t.Fatal("Send đang chặn phải trả lỗi sau Stop")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Send vẫn chặn sau Stop")
+	}
+}
+
+// Lúc đăng xuất không còn ai đọc Frames(), trong khi bridge xả frame đóng kênh
+// và đầu ra của shell bị SIGHUP. Vòng đọc phải đọc cạn tới EOF để Wait và đóng
+// Done — nếu không tiến trình thành zombie và phiên không bao giờ kết thúc.
+func TestStopDrainsUnreadFrames(t *testing.T) {
+	b, _, err := fakeLauncher("flood").Launch(context.Background(), "alice", []byte("Mật khẩu 1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = b.(*procBridge).cmd.Process.Kill() })
+	b.Stop() // không đọc Frames()
+	select {
+	case <-b.Done():
+	case <-time.After(StopWait):
+		t.Fatal("Done không đóng khi còn frame chưa ai đọc")
+	}
+}
+
+func TestLaunchContextCancel(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, _, err := fakeLauncher("hang").Launch(ctx, "alice", []byte("Mật khẩu 1"))
+	if !errors.Is(err, ErrLaunch) {
+		t.Fatalf("got %v", err)
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("huỷ ctx mà mất %s", d)
+	}
+}
+
+// Launch tự phòng thủ: mật khẩu quá dài bị từ chối như sai mật khẩu mà không
+// khởi chạy metaos-auth.
+func TestLaunchRejectsLongPassword(t *testing.T) {
+	l := fakeLauncher("ok")
+	spawned := 0
+	cmdf := l.Command
+	l.Command = func(user string) *exec.Cmd { spawned++; return cmdf(user) }
+	_, _, err := l.Launch(context.Background(), "alice", make([]byte, authx.MaxPassword+1))
+	if !errors.Is(err, ErrAuthFailed) {
+		t.Fatalf("got %v", err)
+	}
+	if spawned != 0 {
+		t.Fatalf("metaos-auth bị gọi %d lần", spawned)
 	}
 }
 

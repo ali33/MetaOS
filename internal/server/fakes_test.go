@@ -20,8 +20,10 @@ type fakeClock struct {
 	now time.Time
 }
 
-func newFakeClock() *fakeClock { return &fakeClock{now: time.Date(2026, 9, 30, 8, 0, 0, 0, time.Local)} }
-func (c *fakeClock) Now() time.Time { c.mu.Lock(); defer c.mu.Unlock(); return c.now }
+func newFakeClock() *fakeClock {
+	return &fakeClock{now: time.Date(2026, 9, 30, 8, 0, 0, 0, time.Local)}
+}
+func (c *fakeClock) Now() time.Time          { c.mu.Lock(); defer c.mu.Unlock(); return c.now }
 func (c *fakeClock) Advance(d time.Duration) { c.mu.Lock(); c.now = c.now.Add(d); c.mu.Unlock() }
 
 // fakeBridge: frame gửi xuống được ghi lại; frame nhị phân và text có ch khác
