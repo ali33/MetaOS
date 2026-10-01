@@ -1,0 +1,290 @@
+import { decodeBinary, encodeBinary, type Msg } from './protocol'
+
+export type ConnState = 'connecting' | 'open' | 'reconnecting' | 'replaced' | 'expired'
+export const BACKOFF_SECONDS = [1, 2, 4, 8, 16, 30]
+export const CLOSE_REPLACED = 4001
+export const CLOSE_SESSION_ENDED = 4401
+// Mã client tự đóng khi socket im lặng quá lâu (PH-001). Đi đúng đường rớt kết nối.
+export const CLOSE_STALE = 4000
+// Máy chủ gửi nhịp tim mỗi 15 giây; quá 40 giây không nhận gì (gần 3 nhịp) là socket đã chết.
+export const STALE_AFTER_MS = 40_000
+
+export interface ChannelHandlers {
+  onReady?(): void
+  onReattach?(): object | void
+  onText?(m: Msg): void
+  onBinary?(p: Uint8Array): void
+  onClose?(reason: string, exitCode?: number): void
+  onError?(code: string, message: string): void
+}
+
+export interface WebSocketLike {
+  binaryType: string
+  readyState: number
+  send(d: string | Uint8Array): void
+  close(code?: number, reason?: string): void
+  onopen: ((e: any) => void) | null
+  onclose: ((e: { code: number; reason: string }) => void) | null
+  onmessage: ((e: { data: any }) => void) | null
+}
+
+export interface ConnOptions {
+  url?: string
+  socketFactory?: (url: string) => WebSocketLike
+  checkSession?: () => Promise<boolean>
+  // reason: lý do máy chủ gửi kèm mã 4401 ("logout", "expired", "shutdown"), rỗng nếu không có.
+  onState?(s: ConnState, reason?: string): void
+  onControlError?(code: string, message: string): void
+  onOrphans?(list: { ch: string; kind: string }[]): void
+  // Không nhận frame nào (kể cả nhịp tim `ping` của máy chủ) quá chừng này ms khi đang mở
+  // thì coi kết nối đã chết im lặng (PH-001). Mặc định STALE_AFTER_MS.
+  staleAfter?: number
+}
+
+const enc = new TextEncoder()
+// Frame nhị phân gửi đi tối đa 64 KiB (kể cả đầu id kênh): dán khối lớn không vượt giới hạn đọc của máy chủ.
+export const MAX_SEND_FRAME = 64 * 1024
+let seq = 0
+
+export class Channel {
+  ready = false
+  reattaching = false
+  // Đang chờ `replay` sau khi gửi open gắn lại: frame nhị phân tới trước replay là đầu ra cũ
+  // còn kẹt trong relay, đã nằm trong phần replay từ offset — bỏ để không in hai lần.
+  awaitReplay = false
+  constructor(
+    readonly id: string,
+    readonly kind: string,
+    readonly params: object,
+    readonly reattachable: boolean,
+    readonly h: ChannelHandlers,
+    private conn: Connection,
+  ) {}
+  sendText(type: string, data?: unknown) { this.conn.sendRaw(JSON.stringify({ ch: this.id, type, data })) }
+  sendBinary(p: Uint8Array | string) {
+    const b = typeof p === 'string' ? enc.encode(p) : p
+    const step = MAX_SEND_FRAME - 1 - this.id.length
+    if (b.length <= step) return this.conn.sendRaw(encodeBinary(this.id, b))
+    for (let i = 0; i < b.length; i += step) this.conn.sendRaw(encodeBinary(this.id, b.subarray(i, i + step)))
+  }
+  close() { this.conn.closeChannel(this) }
+}
+
+export class Connection {
+  state: ConnState = 'connecting'
+  endReason = '' // lý do kèm 4401 khi state === 'expired'
+  private sock: WebSocketLike | null = null
+  private chans = new Map<string, Channel>()
+  // Kênh đã đóng khi socket chưa mở: gửi close cho bridge ngay khi nối lại, và không báo là kênh lạ.
+  private closedIds = new Set<string>()
+  // Cùng các id đó nhưng giữ đến khung `channels` đầu tiên sau khi nối lại (đã gửi close vẫn có thể còn trong danh sách).
+  private closedSeen = new Set<string>()
+  private attempt = 0
+  private timer: ReturnType<typeof setTimeout> | null = null
+  private staleTimer: ReturnType<typeof setTimeout> | null = null
+  private disposed = false
+  private url: string
+  private factory: (url: string) => WebSocketLike
+
+  constructor(private o: ConnOptions = {}) {
+    this.url = o.url ?? `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`
+    this.factory = o.socketFactory ?? ((u) => new WebSocket(u) as unknown as WebSocketLike)
+  }
+
+  private setState(s: ConnState, reason = '') {
+    if (this.state === s) return
+    this.state = s
+    this.endReason = reason
+    this.o.onState?.(s, reason)
+  }
+
+  connect() {
+    if (this.disposed) return
+    const s = this.factory(this.url)
+    s.binaryType = 'arraybuffer'
+    let opened = false
+    s.onopen = () => {
+      opened = true
+      this.attempt = 0
+      this.setState('open')
+      this.armStale(s)
+      for (const id of this.closedIds) {
+        this.sendRaw(JSON.stringify({ ch: '', type: 'close', data: { ch: id } }))
+      }
+      this.closedIds.clear()
+      for (const ch of this.chans.values()) this.sendOpen(ch)
+    }
+    s.onmessage = (e) => {
+      // Socket đã bị coi là chết (PH-001) có thể sống lại và đẩy frame muộn: bỏ.
+      if (this.sock !== s) return
+      if (opened) this.armStale(s)
+      this.onMessage(e.data)
+    }
+    s.onclose = (e) => {
+      if (this.sock !== s) return
+      this.sock = null
+      this.clearStale()
+      if (e.code === CLOSE_REPLACED) return this.setState('replaced')
+      if (e.code === CLOSE_SESSION_ENDED) return this.setState('expired', e.reason)
+      for (const ch of [...this.chans.values()]) {
+        if (ch.reattachable && ch.ready) continue
+        this.chans.delete(ch.id)
+        ch.h.onClose?.('disconnected')
+      }
+      this.setState('reconnecting')
+      if (!opened && this.o.checkSession) {
+        this.o.checkSession().then((ok) => (ok ? this.schedule() : this.setState('expired')), () => this.schedule())
+      } else {
+        this.schedule()
+      }
+    }
+    this.sock = s
+  }
+
+  // Hẹn giờ im lặng, đặt lại mỗi khi nhận frame. Client chỉ nghe, không gửi gì định kỳ:
+  // frame từ trình duyệt tính là hoạt động và sẽ giữ phiên rảnh sống mãi (D9).
+  private armStale(s: WebSocketLike) {
+    this.clearStale()
+    this.staleTimer = setTimeout(() => {
+      this.staleTimer = null
+      if (this.sock !== s) return
+      // Socket chết im lặng thường không phát close kịp thời (trình duyệt chờ bắt tay
+      // đóng): tự gọi onclose như một lần rớt bất thường; onclose thật đến sau bị bỏ
+      // nhờ phép kiểm sock !== s.
+      s.close(CLOSE_STALE, 'stale')
+      s.onclose?.({ code: CLOSE_STALE, reason: 'stale' })
+    }, this.o.staleAfter ?? STALE_AFTER_MS)
+  }
+
+  private clearStale() {
+    if (this.staleTimer) clearTimeout(this.staleTimer)
+    this.staleTimer = null
+  }
+
+  private schedule() {
+    if (this.disposed) return
+    const sec = BACKOFF_SECONDS[Math.min(this.attempt, BACKOFF_SECONDS.length - 1)]
+    this.attempt++
+    this.timer = setTimeout(() => this.connect(), sec * 1000)
+  }
+
+  private isOpen() {
+    return !!this.sock && this.sock.readyState === 1
+  }
+
+  open(kind: string, params: object, h: ChannelHandlers, o: { reattachable?: boolean } = {}): Channel {
+    const id = `${kind}.${(++seq).toString(36)}.${Math.random().toString(36).slice(2, 6)}`
+    const ch = new Channel(id, kind, params, !!o.reattachable, h, this)
+    this.chans.set(id, ch)
+    if (this.isOpen()) this.sendOpen(ch)
+    return ch
+  }
+
+  // adopt tiếp quản một kênh đang sống trong bridge (tab mới / tải lại trang).
+  // Đánh dấu ready để sendOpen đi nhánh gắn lại.
+  adopt(id: string, kind: string, h: ChannelHandlers): Channel {
+    const ch = new Channel(id, kind, {}, true, h, this)
+    ch.ready = true
+    this.chans.set(id, ch)
+    if (this.isOpen()) this.sendOpen(ch)
+    return ch
+  }
+
+  closeChannel(ch: Channel) {
+    if (this.isOpen()) {
+      this.sendRaw(JSON.stringify({ ch: '', type: 'close', data: { ch: ch.id } }))
+      return
+    }
+    // Socket chưa mở: bỏ kênh ngay để không gắn lại. Chỉ khi bridge có thể đã biết kênh
+    // (từng ready hoặc đang gắn lại) mới nhớ id để đóng phía bridge khi nối lại.
+    this.chans.delete(ch.id)
+    if (ch.ready || ch.reattaching) {
+      this.closedIds.add(ch.id)
+      this.closedSeen.add(ch.id)
+    }
+    ch.h.onClose?.('closed')
+  }
+
+  private sendOpen(ch: Channel) {
+    let params: object = ch.params
+    if (ch.ready) {
+      ch.reattaching = true
+      ch.awaitReplay = true
+      const extra = ch.h.onReattach?.() ?? {}
+      params = { ...ch.params, ...extra, reattach: true }
+    }
+    this.sendRaw(JSON.stringify({ ch: '', type: 'open', data: { ch: ch.id, kind: ch.kind, params } }))
+  }
+
+  sendRaw(d: string | Uint8Array) {
+    if (this.isOpen()) this.sock!.send(d)
+  }
+
+  private onMessage(data: unknown) {
+    if (typeof data !== 'string') {
+      let f
+      try {
+        f = decodeBinary(data as ArrayBuffer)
+      } catch (err) {
+        this.o.onControlError?.('internal', `frame nhị phân hỏng: ${(err as Error).message}`)
+        return
+      }
+      const c = this.chans.get(f.ch)
+      if (c && !c.awaitReplay) c.h.onBinary?.(f.payload)
+      return
+    }
+    let m: Msg
+    try {
+      m = JSON.parse(data)
+    } catch {
+      this.o.onControlError?.('internal', `frame văn bản không phải JSON: ${data.slice(0, 120)}`)
+      return
+    }
+    if (m.ch) {
+      const c = this.chans.get(m.ch)
+      if (c && m.type === 'replay') c.awaitReplay = false
+      return void c?.h.onText?.(m)
+    }
+    const d = m.data ?? {}
+    const ch = d.ch ? this.chans.get(d.ch) : undefined
+    switch (m.type) {
+      case 'ready':
+        if (ch) { ch.ready = true; ch.reattaching = false; ch.h.onReady?.() }
+        return
+      case 'close':
+        if (ch) { ch.awaitReplay = false; this.chans.delete(ch.id); ch.h.onClose?.(d.reason, d.exitCode) }
+        return
+      case 'error':
+        if (!ch) return void this.o.onControlError?.(d.code, d.message)
+        ch.awaitReplay = false
+        if (ch.reattaching && d.code === 'not-found') {
+          this.chans.delete(ch.id)
+          return void ch.h.onClose?.('gone')
+        }
+        if (!ch.ready) this.chans.delete(ch.id)
+        ch.h.onError?.(d.code, d.message)
+        return
+      case 'pong':
+      case 'ping': // nhịp tim của máy chủ: chỉ làm mới hẹn giờ im lặng, không trả lời (D9)
+        return
+      case 'channels': {
+        const list = (Array.isArray(m.data) ? m.data : []) as { ch: string; kind: string }[]
+        const unknown = list.filter((c) => !this.chans.has(c.ch) && !this.closedSeen.has(c.ch))
+        this.closedSeen.clear() // chỉ cần cho khung channels đầu tiên sau khi nối lại
+        if (unknown.length) this.o.onOrphans?.(unknown)
+        return
+      }
+      default:
+        this.o.onControlError?.('unsupported', `thông điệp điều khiển lạ: ${m.type}`)
+    }
+  }
+
+  dispose() {
+    this.disposed = true
+    if (this.timer) clearTimeout(this.timer)
+    this.clearStale()
+    const s = this.sock
+    this.sock = null
+    s?.close(1000, 'dispose')
+  }
+}

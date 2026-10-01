@@ -1,0 +1,406 @@
+import { Connection, type WebSocketLike, type ConnState, type ConnOptions } from './channel'
+import { encodeBinary, decodeBinary } from './protocol'
+
+class FakeSocket implements WebSocketLike {
+  binaryType = 'blob'
+  readyState = 0
+  sent: (string | Uint8Array)[] = []
+  onopen: ((e: any) => void) | null = null
+  onclose: ((e: { code: number; reason: string }) => void) | null = null
+  onmessage: ((e: { data: any }) => void) | null = null
+  send(d: string | Uint8Array) { this.sent.push(d) }
+  closed: { code?: number; reason?: string } | null = null
+  close(code?: number, reason?: string) { this.closed = { code, reason } }
+  open() { this.readyState = 1; this.onopen?.({}) }
+  drop(code = 1006, reason = '') { this.readyState = 3; this.onclose?.({ code, reason }) }
+  text(m: object) { this.onmessage?.({ data: JSON.stringify(m) }) }
+  bin(ch: string, s: string) { this.onmessage?.({ data: encodeBinary(ch, new TextEncoder().encode(s)).buffer }) }
+  json() { return this.sent.filter((x): x is string => typeof x === 'string').map((x) => JSON.parse(x)) }
+}
+
+function setup(checkSession = async () => true, extra: Partial<ConnOptions> = {}) {
+  const sockets: FakeSocket[] = []
+  const states: ConnState[] = []
+  const conn = new Connection({
+    url: 'wss://h/ws',
+    socketFactory: () => { const s = new FakeSocket(); sockets.push(s); return s },
+    checkSession,
+    onState: (s) => states.push(s),
+    ...extra,
+  })
+  conn.connect()
+  return { conn, sockets, states, last: () => sockets[sockets.length - 1] }
+}
+
+beforeEach(() => vi.useFakeTimers())
+afterEach(() => vi.useRealTimers())
+
+test('open trước khi socket mở thì xếp hàng, mở xong mới gửi', () => {
+  const { conn, last } = setup()
+  const ch = conn.open('pty', { cols: 80, rows: 24 }, {})
+  expect(last().sent).toHaveLength(0)
+  last().open()
+  expect(last().json()).toEqual([{ ch: '', type: 'open', data: { ch: ch.id, kind: 'pty', params: { cols: 80, rows: 24 } } }])
+  expect(last().binaryType).toBe('arraybuffer')
+})
+
+test('ready, dữ liệu nhị phân, text và close được chuyển đúng kênh', () => {
+  const { conn, last } = setup()
+  last().open()
+  const h = { onReady: vi.fn(), onBinary: vi.fn(), onText: vi.fn(), onClose: vi.fn() }
+  const ch = conn.open('pty', {}, h)
+  last().text({ ch: '', type: 'ready', data: { ch: ch.id } })
+  last().bin(ch.id, 'xin chào')
+  last().text({ ch: ch.id, type: 'x', data: { a: 1 } })
+  last().text({ ch: '', type: 'close', data: { ch: ch.id, reason: 'exit', exitCode: 3 } })
+  expect(h.onReady).toHaveBeenCalledOnce()
+  expect(new TextDecoder().decode(h.onBinary.mock.calls[0][0])).toBe('xin chào')
+  expect(h.onText).toHaveBeenCalledWith({ ch: ch.id, type: 'x', data: { a: 1 } })
+  expect(h.onClose).toHaveBeenCalledWith('exit', 3)
+})
+
+test('sendBinary mã hoá chuỗi thành UTF-8 kèm id kênh', () => {
+  const { conn, last } = setup()
+  last().open()
+  const ch = conn.open('pty', {}, {})
+  ch.sendBinary('ls\r')
+  const frame = last().sent.find((x) => x instanceof Uint8Array) as Uint8Array
+  const { ch: id, payload } = decodeBinary(frame)
+  expect(id).toBe(ch.id)
+  expect(new TextDecoder().decode(payload)).toBe('ls\r')
+})
+
+test('error khi mở kênh: gọi onError và bỏ kênh', () => {
+  const { conn, last } = setup()
+  last().open()
+  const h = { onError: vi.fn(), onBinary: vi.fn() }
+  const ch = conn.open('pty', {}, h)
+  last().text({ ch: '', type: 'error', data: { ch: ch.id, code: 'invalid-params', message: 'shell /x is not listed' } })
+  expect(h.onError).toHaveBeenCalledWith('invalid-params', 'shell /x is not listed')
+  last().bin(ch.id, 'x')
+  expect(h.onBinary).not.toHaveBeenCalled()
+})
+
+test('rớt kết nối: nối lại theo 1, 2, 4… tối đa 30 giây', async () => {
+  const { sockets, states } = setup()
+  sockets[0].open()
+  sockets[0].drop()
+  expect(states.at(-1)).toBe('reconnecting')
+  const waits = [1, 2, 4, 8, 16, 30, 30]
+  for (const [i, sec] of waits.entries()) {
+    await vi.advanceTimersByTimeAsync(sec * 1000 - 1)
+    expect(sockets).toHaveLength(i + 1)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(sockets).toHaveLength(i + 2)
+    sockets[i + 1].drop()
+  }
+})
+
+test('nối lại thành công thì độ trễ quay về 1 giây', async () => {
+  const { sockets } = setup()
+  sockets[0].open(); sockets[0].drop()
+  await vi.advanceTimersByTimeAsync(1000); sockets[1].drop()
+  await vi.advanceTimersByTimeAsync(2000); sockets[2].open(); sockets[2].drop()
+  await vi.advanceTimersByTimeAsync(1000)
+  expect(sockets).toHaveLength(4)
+})
+
+test('gắn lại kênh reattachable, đóng kênh thường', async () => {
+  const { conn, sockets, last } = setup()
+  sockets[0].open()
+  const order: string[] = []
+  const onReattach = () => { order.push('reattach'); return { offset: 5 } }
+  const pty = conn.open('pty', { cols: 80 }, { onReattach, onClose: vi.fn() }, { reattachable: true })
+  const other = { onClose: vi.fn() }
+  const o = conn.open('misc', {}, other)
+  sockets[0].text({ ch: '', type: 'ready', data: { ch: pty.id } })
+  sockets[0].text({ ch: '', type: 'ready', data: { ch: o.id } })
+  sockets[0].drop()
+  expect(other.onClose).toHaveBeenCalledWith('disconnected')
+  await vi.advanceTimersByTimeAsync(1000)
+  last().open()
+  expect(order).toEqual(['reattach'])
+  expect(last().json()).toEqual([{ ch: '', type: 'open', data: { ch: pty.id, kind: 'pty', params: { cols: 80, offset: 5, reattach: true } } }])
+})
+
+test('gắn lại thất bại (not-found) thì onClose("gone")', async () => {
+  const { conn, sockets, last } = setup()
+  sockets[0].open()
+  const h = { onClose: vi.fn() }
+  const pty = conn.open('pty', {}, h, { reattachable: true })
+  sockets[0].text({ ch: '', type: 'ready', data: { ch: pty.id } })
+  sockets[0].drop()
+  await vi.advanceTimersByTimeAsync(1000)
+  last().open()
+  last().text({ ch: '', type: 'error', data: { ch: pty.id, code: 'not-found', message: 'channel is gone' } })
+  expect(h.onClose).toHaveBeenCalledWith('gone')
+})
+
+test('channels: báo các kênh lạ để tiếp quản, bỏ qua kênh đã biết', () => {
+  const orphans = vi.fn()
+  const sockets: FakeSocket[] = []
+  const conn = new Connection({ url: 'wss://h/ws', socketFactory: () => { const s = new FakeSocket(); sockets.push(s); return s }, onOrphans: orphans })
+  conn.connect()
+  sockets[0].open()
+  const mine = conn.open('pty', {}, {}, { reattachable: true })
+  sockets[0].text({ ch: '', type: 'channels', data: [{ ch: mine.id, kind: 'pty' }, { ch: 'pty.old.1', kind: 'pty' }] })
+  expect(orphans).toHaveBeenCalledWith([{ ch: 'pty.old.1', kind: 'pty' }])
+  const h = { onReattach: () => ({ offset: 0 }) }
+  conn.adopt('pty.old.1', 'pty', h)
+  expect(sockets[0].json().at(-1)).toEqual({ ch: '', type: 'open', data: { ch: 'pty.old.1', kind: 'pty', params: { offset: 0, reattach: true } } })
+})
+
+test('4001: bị tab khác thay, không tự nối lại', async () => {
+  const { sockets, states } = setup()
+  sockets[0].open()
+  sockets[0].drop(4001, 'replaced')
+  await vi.advanceTimersByTimeAsync(120_000)
+  expect(sockets).toHaveLength(1)
+  expect(states.at(-1)).toBe('replaced')
+})
+
+test('4401: phiên hết hạn', async () => {
+  const { sockets, states } = setup()
+  sockets[0].open()
+  sockets[0].drop(4401, 'expired')
+  await vi.advanceTimersByTimeAsync(120_000)
+  expect(sockets).toHaveLength(1)
+  expect(states.at(-1)).toBe('expired')
+})
+
+test('nối lại thất bại và checkSession=false thì expired', async () => {
+  const { sockets, states } = setup(async () => false)
+  sockets[0].open()
+  sockets[0].drop()
+  await vi.advanceTimersByTimeAsync(1000)
+  sockets[1].drop() // chưa từng mở: nâng cấp bị 401
+  await vi.advanceTimersByTimeAsync(0)
+  expect(states.at(-1)).toBe('expired')
+  await vi.advanceTimersByTimeAsync(120_000)
+  expect(sockets).toHaveLength(2)
+})
+
+test('F3: close khi mất kết nối ⇒ sau nối lại gửi close, không gửi open gắn lại', async () => {
+  const { conn, sockets, last } = setup()
+  sockets[0].open()
+  const h = { onClose: vi.fn() }
+  const pty = conn.open('pty', {}, h, { reattachable: true })
+  sockets[0].text({ ch: '', type: 'ready', data: { ch: pty.id } })
+  sockets[0].drop()
+  pty.close()
+  await vi.advanceTimersByTimeAsync(1000)
+  last().open()
+  expect(last().json()).toEqual([{ ch: '', type: 'close', data: { ch: pty.id } }])
+  // chỉ gửi một lần: lần nối lại kế tiếp không còn close
+  last().drop()
+  await vi.advanceTimersByTimeAsync(1000)
+  last().open()
+  expect(last().json()).toEqual([])
+})
+
+test('F3: channels chứa kênh vừa đóng lúc mất kết nối thì không báo onOrphans', async () => {
+  const orphans = vi.fn()
+  const sockets: FakeSocket[] = []
+  const conn = new Connection({ url: 'wss://h/ws', socketFactory: () => { const s = new FakeSocket(); sockets.push(s); return s }, onOrphans: orphans })
+  conn.connect()
+  sockets[0].open()
+  const pty = conn.open('pty', {}, {}, { reattachable: true })
+  sockets[0].text({ ch: '', type: 'ready', data: { ch: pty.id } })
+  sockets[0].drop()
+  pty.close()
+  await vi.advanceTimersByTimeAsync(1000)
+  sockets[1].open()
+  sockets[1].text({ ch: '', type: 'channels', data: [{ ch: pty.id, kind: 'pty' }, { ch: 'pty.old.1', kind: 'pty' }] })
+  expect(orphans).toHaveBeenCalledWith([{ ch: 'pty.old.1', kind: 'pty' }])
+})
+
+test('F3: close trước khi socket mở lần đầu ⇒ không gửi open cũng không gửi close', () => {
+  const { conn, last } = setup()
+  const h = { onClose: vi.fn() }
+  const ch = conn.open('pty', {}, h)
+  ch.close()
+  last().open()
+  expect(last().json()).toEqual([])
+  expect(h.onClose).toHaveBeenCalledWith('closed')
+})
+
+test('F3: close khi mất kết nối gọi onClose("closed")', async () => {
+  const { conn, sockets } = setup()
+  sockets[0].open()
+  const h = { onClose: vi.fn() }
+  const pty = conn.open('pty', {}, h, { reattachable: true })
+  sockets[0].text({ ch: '', type: 'ready', data: { ch: pty.id } })
+  sockets[0].drop()
+  pty.close()
+  expect(h.onClose).toHaveBeenCalledWith('closed')
+})
+
+test('F3: closedSeen được dọn sau khung channels đầu tiên', async () => {
+  const orphans = vi.fn()
+  const sockets: FakeSocket[] = []
+  const conn = new Connection({ url: 'wss://h/ws', socketFactory: () => { const s = new FakeSocket(); sockets.push(s); return s }, onOrphans: orphans })
+  conn.connect()
+  sockets[0].open()
+  const pty = conn.open('pty', {}, {}, { reattachable: true })
+  sockets[0].text({ ch: '', type: 'ready', data: { ch: pty.id } })
+  sockets[0].drop()
+  pty.close()
+  await vi.advanceTimersByTimeAsync(1000)
+  sockets[1].open()
+  sockets[1].text({ ch: '', type: 'channels', data: [] })
+  expect(orphans).not.toHaveBeenCalled()
+  // id không còn được nhớ: nếu bridge liệt kê lại thì là kênh lạ
+  sockets[1].text({ ch: '', type: 'channels', data: [{ ch: pty.id, kind: 'pty' }] })
+  expect(orphans).toHaveBeenCalledWith([{ ch: pty.id, kind: 'pty' }])
+})
+
+test('I1: gắn lại thì bỏ frame nhị phân cũ cho tới khi có replay', async () => {
+  const { conn, sockets, last } = setup()
+  sockets[0].open()
+  const got: string[] = []
+  const h = { onReattach: () => ({ offset: 3 }), onBinary: (p: Uint8Array) => got.push(new TextDecoder().decode(p)), onText: vi.fn() }
+  const pty = conn.open('pty', {}, h, { reattachable: true })
+  sockets[0].text({ ch: '', type: 'ready', data: { ch: pty.id } })
+  sockets[0].bin(pty.id, 'abc')
+  sockets[0].drop()
+  await vi.advanceTimersByTimeAsync(1000)
+  last().open()
+  last().bin(pty.id, 'cũ') // frame còn kẹt trong relay từ trước khi tách
+  last().text({ ch: pty.id, type: 'replay', data: { offset: 3, reset: false } })
+  last().bin(pty.id, 'mới')
+  expect(got).toEqual(['abc', 'mới'])
+  expect(h.onText).toHaveBeenCalledWith({ ch: pty.id, type: 'replay', data: { offset: 3, reset: false } })
+})
+
+test('I1: gắn lại bị error/close thì không còn chặn frame nhị phân', async () => {
+  const { conn, sockets, last } = setup()
+  sockets[0].open()
+  const got: string[] = []
+  const h = { onReattach: () => ({ offset: 0 }), onBinary: (p: Uint8Array) => got.push(new TextDecoder().decode(p)), onError: vi.fn() }
+  const pty = conn.open('pty', {}, h, { reattachable: true })
+  sockets[0].text({ ch: '', type: 'ready', data: { ch: pty.id } })
+  sockets[0].drop()
+  await vi.advanceTimersByTimeAsync(1000)
+  last().open()
+  last().text({ ch: '', type: 'error', data: { ch: pty.id, code: 'internal', message: 'x' } })
+  last().bin(pty.id, 'sau lỗi')
+  expect(got).toEqual(['sau lỗi'])
+})
+
+test('I2: 4401 chuyển kèm lý do đóng', () => {
+  const reasons: (string | undefined)[] = []
+  const sockets: FakeSocket[] = []
+  const conn = new Connection({ url: 'wss://h/ws', socketFactory: () => { const s = new FakeSocket(); sockets.push(s); return s }, onState: (_s, r) => reasons.push(r) })
+  conn.connect()
+  sockets[0].open()
+  sockets[0].drop(4401, 'logout')
+  expect(conn.state).toBe('expired')
+  expect(conn.endReason).toBe('logout')
+  expect(reasons.at(-1)).toBe('logout')
+})
+
+test('sendBinary chia dữ liệu lớn (dán > 1 MiB) thành frame ≤ 64 KiB, đúng thứ tự', () => {
+  const { conn, last } = setup()
+  last().open()
+  const ch = conn.open('pty', {}, {})
+  const big = new Uint8Array(1.5 * 1024 * 1024 + 7).map((_, i) => i % 251)
+  ch.sendBinary(big)
+  const frames = last().sent.filter((x): x is Uint8Array => x instanceof Uint8Array)
+  expect(frames.length).toBeGreaterThan(1)
+  for (const f of frames) expect(f.length).toBeLessThanOrEqual(64 * 1024)
+  const joined = new Uint8Array(big.length)
+  let off = 0
+  for (const f of frames) {
+    const { ch: id, payload } = decodeBinary(f)
+    expect(id).toBe(ch.id)
+    joined.set(payload, off)
+    off += payload.length
+  }
+  expect(off).toBe(big.length)
+  expect(joined.every((v, i) => v === big[i])).toBe(true)
+})
+
+// PH-001: kết nối chết im lặng (mạng rớt, máy chủ đứng) không bao giờ có sự kiện close.
+// Máy chủ gửi nhịp tim {"ch":"","type":"ping"} mỗi 15 giây; client không nhận gì quá
+// staleAfter thì coi socket đã chết và đi đúng đường rớt kết nối. Client không gửi gì (D9).
+describe('PH-001: phát hiện kết nối chết im lặng', () => {
+  test('im lặng quá staleAfter ⇒ đóng socket, reconnecting, nối lại và gắn lại kênh', async () => {
+    const { conn, sockets, states, last } = setup(async () => true, { staleAfter: 40_000 })
+    sockets[0].open()
+    const h = { onReattach: () => ({ offset: 7 }), onClose: vi.fn() }
+    const pty = conn.open('pty', {}, h, { reattachable: true })
+    sockets[0].text({ ch: '', type: 'ready', data: { ch: pty.id } })
+    const sentBefore = sockets[0].sent.length
+    await vi.advanceTimersByTimeAsync(40_000 - 1)
+    expect(sockets[0].closed).toBeNull()
+    expect(states.at(-1)).toBe('open')
+    await vi.advanceTimersByTimeAsync(1)
+    expect(sockets[0].closed?.code).toBe(4000)
+    expect(states.at(-1)).toBe('reconnecting')
+    expect(conn.state).toBe('reconnecting')
+    expect(h.onClose).not.toHaveBeenCalled()
+    expect(sockets[0].sent.length).toBe(sentBefore) // không gửi frame nào (D9)
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(sockets).toHaveLength(2)
+    last().open()
+    expect(last().json()).toEqual([{ ch: '', type: 'open', data: { ch: pty.id, kind: 'pty', params: { offset: 7, reattach: true } } }])
+    // onclose muộn của socket cũ (trình duyệt hết giờ bắt tay đóng) không được làm gì thêm
+    sockets[0].drop(1006)
+    expect(states.at(-1)).toBe('open')
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(sockets).toHaveLength(2)
+  })
+
+  test('frame tới trước ngưỡng (kể cả nhịp tim ping, nhị phân) giữ kết nối mở', async () => {
+    const { sockets, states } = setup(async () => true, { staleAfter: 40_000 })
+    sockets[0].open()
+    for (let i = 0; i < 5; i++) {
+      await vi.advanceTimersByTimeAsync(30_000)
+      if (i % 2) sockets[0].bin('x', 'y')
+      else sockets[0].text({ ch: '', type: 'ping' })
+    }
+    expect(sockets[0].closed).toBeNull()
+    expect(states.at(-1)).toBe('open')
+    expect(sockets).toHaveLength(1)
+  })
+
+  test('nhịp tim ping được xử lý im lặng: không băng lỗi, không trả lời', () => {
+    const errors = vi.fn()
+    const { sockets } = setup(async () => true, { onControlError: errors })
+    sockets[0].open()
+    sockets[0].text({ ch: '', type: 'ping' })
+    expect(errors).not.toHaveBeenCalled()
+    expect(sockets[0].sent).toHaveLength(0)
+  })
+
+  test('mặc định staleAfter là 40 giây', async () => {
+    const { sockets, states } = setup()
+    sockets[0].open()
+    await vi.advanceTimersByTimeAsync(39_999)
+    expect(states.at(-1)).toBe('open')
+    await vi.advanceTimersByTimeAsync(1)
+    expect(states.at(-1)).toBe('reconnecting')
+  })
+
+  test('dispose hoặc rớt kết nối thì huỷ hẹn giờ', async () => {
+    const a = setup(async () => true, { staleAfter: 40_000 })
+    a.sockets[0].open()
+    a.conn.dispose()
+    expect(vi.getTimerCount()).toBe(0)
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(a.states.at(-1)).toBe('open')
+    expect(a.sockets).toHaveLength(1)
+
+    const b = setup(async () => true, { staleAfter: 40_000 })
+    b.sockets[0].open()
+    b.sockets[0].drop()
+    expect(vi.getTimerCount()).toBe(1) // chỉ còn hẹn giờ nối lại
+  })
+
+  test('chưa mở thì không tính im lặng (đang connecting)', async () => {
+    const { sockets, states } = setup(async () => true, { staleAfter: 40_000 })
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(sockets[0].closed).toBeNull()
+    expect(states).toEqual([])
+  })
+})
