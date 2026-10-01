@@ -16,7 +16,7 @@ ROOT_HOST="$(cd "$ROOT" && (pwd -W 2>/dev/null || pwd))"
 KEEP=0; E2E=0; UP=0
 for a in "$@"; do case "$a" in --keep) KEEP=1;; --e2e) E2E=1;; --up) UP=1; KEEP=1;; esac; done
 NAME=metaos-it
-if [ "$E2E" = 1 ]; then (cd "$ROOT/web" && npm ci && npm run build); fi
+if [ "$E2E" = 1 ]; then (cd "$ROOT/web" && { [ -d node_modules ] || npm ci; } && npm run build); fi
 docker build -t metaos-it:dev -f "$ROOT_HOST/test/integration/Dockerfile" "$ROOT_HOST"
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 docker run -d --name "$NAME" --privileged --cgroupns=host \
@@ -37,4 +37,4 @@ echo "metaos-it sẵn sàng tại https://127.0.0.1:9443"
 "$ROOT/scripts/go.sh" sh -c 'CGO_ENABLED=0 go test -c -tags integration -o bin/it.test ./test/integration/'
 docker cp "$ROOT_HOST/bin/it.test" "$NAME":/usr/local/bin/it.test
 docker exec "$NAME" /usr/local/bin/it.test -test.v -test.count=1
-if [ "$E2E" = 1 ]; then (cd "$ROOT/test/e2e" && npm ci && npx playwright install chromium && npx playwright test); fi
+if [ "$E2E" = 1 ]; then (cd "$ROOT/test/e2e" && { [ -d node_modules ] || npm ci; } && npx playwright install chromium && npx playwright test); fi
