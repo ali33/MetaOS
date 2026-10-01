@@ -144,3 +144,16 @@ test('I2: 4401 "logout" do tab khác đăng xuất ⇒ onLoggedOut, không onExp
   expect(onLoggedOut).toHaveBeenCalledOnce()
   expect(onExpired).not.toHaveBeenCalled()
 })
+
+// PH-002: Escape khi menu người dùng đang mở chỉ đóng menu, không đóng/mở Hoạt động cùng lúc.
+test('PH-002: Escape đóng menu người dùng mà không đụng tới Hoạt động', () => {
+  renderDesktop()
+  fireEvent.click(screen.getByText('Hoạt động'))
+  fireEvent.click(screen.getByText('alice ▾'))
+  const search = screen.getByLabelText('Tìm ứng dụng')
+  fireEvent.keyDown(search, { key: 'Escape' })
+  expect(screen.queryByRole('menu')).toBeNull()
+  expect(screen.getByRole('dialog', { name: 'Hoạt động' })).toBeTruthy()
+  fireEvent.keyDown(search, { key: 'Escape' }) // lần sau: menu đã đóng, Escape về với Hoạt động
+  expect(screen.queryByRole('dialog', { name: 'Hoạt động' })).toBeNull()
+})
