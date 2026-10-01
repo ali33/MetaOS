@@ -127,7 +127,8 @@ Một WebSocket cho mỗi phiên trình duyệt, chia thành nhiều kênh.
   trong sudoers ⇒ lỗi `sudo-failed` với thông điệp gốc của sudo.
 - HTTPS: chứng chỉ ở `/etc/metaos/tls/`. Nếu thiếu thì tự sinh chứng chỉ tự ký
   (ECDSA P-256, 10 năm) lúc khởi động. Có tuỳ chọn chạy HTTP sau reverse proxy
-  (chỉ khi lắng nghe `127.0.0.1`).
+  (chỉ khi lắng nghe loopback: `127.0.0.1`, `::1` hoặc `localhost`; khi đó
+  Host của request cũng phải là loopback để chặn DNS rebinding).
 - Header: `Content-Security-Policy` chặt (không inline script), `X-Frame-Options:
   DENY`, `Referrer-Policy: no-referrer`.
 
@@ -240,7 +241,7 @@ sang backend. `make dev` dựng cả hai.
 
 | Mốc | Nội dung | Dùng được gì khi xong |
 |---|---|---|
-| M1 | Protocol, ws, auth PAM (chưa TOTP), bridge, khung desktop + trình quản lý cửa sổ (chưa có góc nóng, khoá màn hình, chỉ báo CPU/RAM), Terminal | Đăng nhập và dùng terminal trong desktop web |
+| M1 | Protocol, ws, auth PAM (chưa TOTP), bridge, khung desktop + trình quản lý cửa sổ (chưa có góc nóng, khoá màn hình, chỉ báo CPU/RAM; chưa lưu trạng thái desktop ngoài chủ đề sáng/tối, chưa có trang cài đặt phím tắt — dời M2), Terminal | Đăng nhập và dùng terminal trong desktop web |
 | M2 | Quản lý file + Monaco; lưu trạng thái desktop; cài đặt phím tắt; góc nóng | Quản lý file |
 | M3 | Giám sát hệ thống + tiến trình; chỉ báo CPU/RAM trên thanh trên cùng | Theo dõi máy |
 | M4 | Dịch vụ & log, luồng sudo | Quản trị dịch vụ |
