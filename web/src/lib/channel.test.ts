@@ -1,4 +1,4 @@
-import { Connection, type WebSocketLike, type ConnState } from './channel'
+import { Connection, type WebSocketLike, type ConnState, type ConnOptions } from './channel'
 import { encodeBinary, decodeBinary } from './protocol'
 
 class FakeSocket implements WebSocketLike {
@@ -9,7 +9,8 @@ class FakeSocket implements WebSocketLike {
   onclose: ((e: { code: number; reason: string }) => void) | null = null
   onmessage: ((e: { data: any }) => void) | null = null
   send(d: string | Uint8Array) { this.sent.push(d) }
-  close() {}
+  closed: { code?: number; reason?: string } | null = null
+  close(code?: number, reason?: string) { this.closed = { code, reason } }
   open() { this.readyState = 1; this.onopen?.({}) }
   drop(code = 1006, reason = '') { this.readyState = 3; this.onclose?.({ code, reason }) }
   text(m: object) { this.onmessage?.({ data: JSON.stringify(m) }) }
@@ -17,7 +18,7 @@ class FakeSocket implements WebSocketLike {
   json() { return this.sent.filter((x): x is string => typeof x === 'string').map((x) => JSON.parse(x)) }
 }
 
-function setup(checkSession = async () => true) {
+function setup(checkSession = async () => true, extra: Partial<ConnOptions> = {}) {
   const sockets: FakeSocket[] = []
   const states: ConnState[] = []
   const conn = new Connection({
@@ -25,6 +26,7 @@ function setup(checkSession = async () => true) {
     socketFactory: () => { const s = new FakeSocket(); sockets.push(s); return s },
     checkSession,
     onState: (s) => states.push(s),
+    ...extra,
   })
   conn.connect()
   return { conn, sockets, states, last: () => sockets[sockets.length - 1] }
@@ -316,4 +318,89 @@ test('sendBinary chia dữ liệu lớn (dán > 1 MiB) thành frame ≤ 64 KiB, 
   }
   expect(off).toBe(big.length)
   expect(joined.every((v, i) => v === big[i])).toBe(true)
+})
+
+// PH-001: kết nối chết im lặng (mạng rớt, máy chủ đứng) không bao giờ có sự kiện close.
+// Máy chủ gửi nhịp tim {"ch":"","type":"ping"} mỗi 15 giây; client không nhận gì quá
+// staleAfter thì coi socket đã chết và đi đúng đường rớt kết nối. Client không gửi gì (D9).
+describe('PH-001: phát hiện kết nối chết im lặng', () => {
+  test('im lặng quá staleAfter ⇒ đóng socket, reconnecting, nối lại và gắn lại kênh', async () => {
+    const { conn, sockets, states, last } = setup(async () => true, { staleAfter: 40_000 })
+    sockets[0].open()
+    const h = { onReattach: () => ({ offset: 7 }), onClose: vi.fn() }
+    const pty = conn.open('pty', {}, h, { reattachable: true })
+    sockets[0].text({ ch: '', type: 'ready', data: { ch: pty.id } })
+    const sentBefore = sockets[0].sent.length
+    await vi.advanceTimersByTimeAsync(40_000 - 1)
+    expect(sockets[0].closed).toBeNull()
+    expect(states.at(-1)).toBe('open')
+    await vi.advanceTimersByTimeAsync(1)
+    expect(sockets[0].closed?.code).toBe(4000)
+    expect(states.at(-1)).toBe('reconnecting')
+    expect(conn.state).toBe('reconnecting')
+    expect(h.onClose).not.toHaveBeenCalled()
+    expect(sockets[0].sent.length).toBe(sentBefore) // không gửi frame nào (D9)
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(sockets).toHaveLength(2)
+    last().open()
+    expect(last().json()).toEqual([{ ch: '', type: 'open', data: { ch: pty.id, kind: 'pty', params: { offset: 7, reattach: true } } }])
+    // onclose muộn của socket cũ (trình duyệt hết giờ bắt tay đóng) không được làm gì thêm
+    sockets[0].drop(1006)
+    expect(states.at(-1)).toBe('open')
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(sockets).toHaveLength(2)
+  })
+
+  test('frame tới trước ngưỡng (kể cả nhịp tim ping, nhị phân) giữ kết nối mở', async () => {
+    const { sockets, states } = setup(async () => true, { staleAfter: 40_000 })
+    sockets[0].open()
+    for (let i = 0; i < 5; i++) {
+      await vi.advanceTimersByTimeAsync(30_000)
+      if (i % 2) sockets[0].bin('x', 'y')
+      else sockets[0].text({ ch: '', type: 'ping' })
+    }
+    expect(sockets[0].closed).toBeNull()
+    expect(states.at(-1)).toBe('open')
+    expect(sockets).toHaveLength(1)
+  })
+
+  test('nhịp tim ping được xử lý im lặng: không băng lỗi, không trả lời', () => {
+    const errors = vi.fn()
+    const { sockets } = setup(async () => true, { onControlError: errors })
+    sockets[0].open()
+    sockets[0].text({ ch: '', type: 'ping' })
+    expect(errors).not.toHaveBeenCalled()
+    expect(sockets[0].sent).toHaveLength(0)
+  })
+
+  test('mặc định staleAfter là 40 giây', async () => {
+    const { sockets, states } = setup()
+    sockets[0].open()
+    await vi.advanceTimersByTimeAsync(39_999)
+    expect(states.at(-1)).toBe('open')
+    await vi.advanceTimersByTimeAsync(1)
+    expect(states.at(-1)).toBe('reconnecting')
+  })
+
+  test('dispose hoặc rớt kết nối thì huỷ hẹn giờ', async () => {
+    const a = setup(async () => true, { staleAfter: 40_000 })
+    a.sockets[0].open()
+    a.conn.dispose()
+    expect(vi.getTimerCount()).toBe(0)
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(a.states.at(-1)).toBe('open')
+    expect(a.sockets).toHaveLength(1)
+
+    const b = setup(async () => true, { staleAfter: 40_000 })
+    b.sockets[0].open()
+    b.sockets[0].drop()
+    expect(vi.getTimerCount()).toBe(1) // chỉ còn hẹn giờ nối lại
+  })
+
+  test('chưa mở thì không tính im lặng (đang connecting)', async () => {
+    const { sockets, states } = setup(async () => true, { staleAfter: 40_000 })
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(sockets[0].closed).toBeNull()
+    expect(states).toEqual([])
+  })
 })

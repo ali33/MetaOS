@@ -11,10 +11,11 @@ import (
 )
 
 const (
-	CloseReplaced     websocket.StatusCode = 4001
-	CloseSessionEnded websocket.StatusCode = 4401
-	defaultPingEvery                       = 30 * time.Second
-	writeTimeout                           = 5 * time.Second
+	CloseReplaced         websocket.StatusCode = 4001
+	CloseSessionEnded     websocket.StatusCode = 4401
+	defaultPingEvery                           = 30 * time.Second
+	defaultHeartbeatEvery                      = 15 * time.Second
+	writeTimeout                               = 5 * time.Second
 )
 
 func (s *Server) current(id string) *websocket.Conn {
@@ -135,6 +136,9 @@ func (s *Server) ws(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		t := time.NewTicker(s.pingEvery)
 		defer t.Stop()
+		hb := time.NewTicker(s.heartbeatEvery)
+		defer hb.Stop()
+		heartbeat := control(protocol.TypePing).Data
 		for {
 			select {
 			case <-ctx.Done():
@@ -149,6 +153,16 @@ func (s *Server) ws(w http.ResponseWriter, r *http.Request) {
 				}
 				if s.onPing != nil {
 					s.onPing()
+				}
+			case <-hb.C:
+				// Nhịp tim cho JS (PH-001). c.Write tự khoá nên an toàn song song
+				// với pump; cùng hạn ghi và cùng cách xử lý lỗi như pump.
+				wctx, wcancel := context.WithTimeout(ctx, writeTimeout)
+				err := c.Write(wctx, websocket.MessageText, heartbeat)
+				wcancel()
+				if err != nil {
+					c.CloseNow()
+					return
 				}
 			}
 		}

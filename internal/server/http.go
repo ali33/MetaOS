@@ -38,15 +38,19 @@ type Server struct {
 	mu    sync.Mutex
 	conns map[string]*websocket.Conn // WebSocket hiện tại của mỗi phiên (relay.go)
 
-	pingEvery time.Duration  // chu kỳ ping giao thức WebSocket (D9: không tính là hoạt động)
-	onPing    func()         // chỉ dùng trong test: gọi sau mỗi ping thành công
-	closing   sync.WaitGroup // các lần đóng WebSocket 4401 đang chạy (Shutdown chờ)
+	pingEvery time.Duration // chu kỳ ping giao thức WebSocket (D9: không tính là hoạt động)
+	onPing    func()        // chỉ dùng trong test: gọi sau mỗi ping thành công
+	// chu kỳ nhịp tim mức ứng dụng {"ch":"","type":"ping"} gửi trình duyệt (PH-001):
+	// ping giao thức không tới được JS nên client dùng nhịp tim này để phát hiện
+	// kết nối chết im lặng. Chiều ws → trình duyệt, không tính là hoạt động (D9).
+	heartbeatEvery time.Duration
+	closing        sync.WaitGroup // các lần đóng WebSocket 4401 đang chạy (Shutdown chờ)
 }
 
 func New(cfg Config, store *Store, l Launcher, static fs.FS, logw io.Writer) *Server {
 	return &Server{cfg: cfg, store: store, launcher: l, static: static,
 		log: log.New(logw, "metaos-ws: ", 0), conns: map[string]*websocket.Conn{},
-		pingEvery: defaultPingEvery}
+		pingEvery: defaultPingEvery, heartbeatEvery: defaultHeartbeatEvery}
 }
 
 func (s *Server) Handler() http.Handler {

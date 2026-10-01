@@ -4,6 +4,10 @@ export type ConnState = 'connecting' | 'open' | 'reconnecting' | 'replaced' | 'e
 export const BACKOFF_SECONDS = [1, 2, 4, 8, 16, 30]
 export const CLOSE_REPLACED = 4001
 export const CLOSE_SESSION_ENDED = 4401
+// Mã client tự đóng khi socket im lặng quá lâu (PH-001). Đi đúng đường rớt kết nối.
+export const CLOSE_STALE = 4000
+// Máy chủ gửi nhịp tim mỗi 15 giây; quá 40 giây không nhận gì (gần 3 nhịp) là socket đã chết.
+export const STALE_AFTER_MS = 40_000
 
 export interface ChannelHandlers {
   onReady?(): void
@@ -32,6 +36,9 @@ export interface ConnOptions {
   onState?(s: ConnState, reason?: string): void
   onControlError?(code: string, message: string): void
   onOrphans?(list: { ch: string; kind: string }[]): void
+  // Không nhận frame nào (kể cả nhịp tim `ping` của máy chủ) quá chừng này ms khi đang mở
+  // thì coi kết nối đã chết im lặng (PH-001). Mặc định STALE_AFTER_MS.
+  staleAfter?: number
 }
 
 const enc = new TextEncoder()
@@ -74,6 +81,7 @@ export class Connection {
   private closedSeen = new Set<string>()
   private attempt = 0
   private timer: ReturnType<typeof setTimeout> | null = null
+  private staleTimer: ReturnType<typeof setTimeout> | null = null
   private disposed = false
   private url: string
   private factory: (url: string) => WebSocketLike
@@ -99,16 +107,23 @@ export class Connection {
       opened = true
       this.attempt = 0
       this.setState('open')
+      this.armStale(s)
       for (const id of this.closedIds) {
         this.sendRaw(JSON.stringify({ ch: '', type: 'close', data: { ch: id } }))
       }
       this.closedIds.clear()
       for (const ch of this.chans.values()) this.sendOpen(ch)
     }
-    s.onmessage = (e) => this.onMessage(e.data)
+    s.onmessage = (e) => {
+      // Socket đã bị coi là chết (PH-001) có thể sống lại và đẩy frame muộn: bỏ.
+      if (this.sock !== s) return
+      if (opened) this.armStale(s)
+      this.onMessage(e.data)
+    }
     s.onclose = (e) => {
       if (this.sock !== s) return
       this.sock = null
+      this.clearStale()
       if (e.code === CLOSE_REPLACED) return this.setState('replaced')
       if (e.code === CLOSE_SESSION_ENDED) return this.setState('expired', e.reason)
       for (const ch of [...this.chans.values()]) {
@@ -124,6 +139,26 @@ export class Connection {
       }
     }
     this.sock = s
+  }
+
+  // Hẹn giờ im lặng, đặt lại mỗi khi nhận frame. Client chỉ nghe, không gửi gì định kỳ:
+  // frame từ trình duyệt tính là hoạt động và sẽ giữ phiên rảnh sống mãi (D9).
+  private armStale(s: WebSocketLike) {
+    this.clearStale()
+    this.staleTimer = setTimeout(() => {
+      this.staleTimer = null
+      if (this.sock !== s) return
+      // Socket chết im lặng thường không phát close kịp thời (trình duyệt chờ bắt tay
+      // đóng): tự gọi onclose như một lần rớt bất thường; onclose thật đến sau bị bỏ
+      // nhờ phép kiểm sock !== s.
+      s.close(CLOSE_STALE, 'stale')
+      s.onclose?.({ code: CLOSE_STALE, reason: 'stale' })
+    }, this.o.staleAfter ?? STALE_AFTER_MS)
+  }
+
+  private clearStale() {
+    if (this.staleTimer) clearTimeout(this.staleTimer)
+    this.staleTimer = null
   }
 
   private schedule() {
@@ -230,6 +265,7 @@ export class Connection {
         ch.h.onError?.(d.code, d.message)
         return
       case 'pong':
+      case 'ping': // nhịp tim của máy chủ: chỉ làm mới hẹn giờ im lặng, không trả lời (D9)
         return
       case 'channels': {
         const list = (Array.isArray(m.data) ? m.data : []) as { ch: string; kind: string }[]
@@ -246,6 +282,7 @@ export class Connection {
   dispose() {
     this.disposed = true
     if (this.timer) clearTimeout(this.timer)
+    this.clearStale()
     const s = this.sock
     this.sock = null
     s?.close(1000, 'dispose')

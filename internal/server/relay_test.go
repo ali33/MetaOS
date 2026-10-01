@@ -385,3 +385,41 @@ func TestWSDropsBrowserWSOnlyControls(t *testing.T) {
 		t.Fatalf("bridge nhận điều khiển: %s", got)
 	}
 }
+
+// PH-001: ping giao thức WebSocket không tới được JS, nên ws gửi thêm nhịp tim
+// mức ứng dụng {"ch":"","type":"ping"} để client nhận ra kết nối chết im lặng.
+// Nhịp tim do ws tự ghi: không xuống bridge, và không tính là hoạt động (D9).
+func TestWSHeartbeatReachesBrowserOnly(t *testing.T) {
+	l := newLive(t)
+	l.srv.heartbeatEvery = 10 * time.Millisecond
+	cookie, _ := l.loginLive(t)
+	c := l.mustDial(t, cookie)
+	defer c.CloseNow()
+	b := l.l.lastBridge()
+	l.clock.Advance(l.srv.cfg.SessionIdle - time.Minute)
+	for i := 0; i < 3; i++ {
+		ctx, cancel := readCtx()
+		typ, data, err := c.Read(ctx)
+		cancel()
+		if err != nil || typ != websocket.MessageText || string(data) != `{"ch":"","type":"ping"}` {
+			t.Fatalf("nhịp tim thứ %d: %v %v %q", i+1, err, typ, data)
+		}
+	}
+	if got := strings.Join(b.controls(), ","); got != "attached" {
+		t.Fatalf("nhịp tim không được xuống bridge, bridge nhận: %s", got)
+	}
+	ctx := c.CloseRead(context.Background())
+	l.clock.Advance(2 * time.Minute)
+	req, _ := http.NewRequest("GET", l.ts.URL+"/api/session", nil)
+	req.Header.Set("Cookie", cookie)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil || resp.StatusCode != 401 {
+		t.Fatalf("nhịp tim không được giữ phiên sống: %v %v", err, resp)
+	}
+	resp.Body.Close()
+	select {
+	case <-ctx.Done():
+	case <-time.After(3 * time.Second):
+		t.Fatal("WebSocket phải bị đóng khi phiên hết hạn")
+	}
+}
