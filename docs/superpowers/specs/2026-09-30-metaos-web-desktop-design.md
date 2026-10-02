@@ -93,8 +93,12 @@ Một WebSocket cho mỗi phiên trình duyệt, chia thành nhiều kênh.
   bridge ở máy khác (qua SSH hoặc kết nối ngược) nói đúng giao thức này, và giao
   diện chỉ cần thêm trường `host` khi `open`.
 - Mã lỗi chuẩn: `access-denied`, `not-found`, `invalid-params`, `unsupported`,
-  `internal`, `sudo-required`, `sudo-failed`. `message` là thông điệp gốc của
-  hệ thống (vd. `open /etc/shadow: permission denied`).
+  `internal`, `sudo-required`, `sudo-failed`; từ M2 thêm `exists` (đích đã tồn
+  tại), `modified` (file bị sửa từ nơi khác kể từ lúc đọc — so mtime), `no-space`
+  (không đủ chỗ trống / hết hạn mức), `cancelled` (người dùng huỷ thao tác dài).
+  `message` là thông điệp gốc của hệ thống (vd. `open /etc/shadow: permission denied`).
+- Kênh có thể mang `params.meta` (object JSON ≤ 1 KiB) lúc `open`; bridge lưu nguyên
+  văn và trả lại trong khung `channels` để tab mới tiếp quản giữ được nhóm tab.
 - Giới hạn: frame văn bản ≤ 1 MiB; khúc tải lên 256 KiB; mỗi phiên ≤ 64 kênh mở
   cùng lúc.
 
@@ -147,8 +151,10 @@ Một WebSocket cho mỗi phiên trình duyệt, chia thành nhiều kênh.
 - **Dock**: hiện ở chế độ Hoạt động; tuỳ chọn luôn hiện.
 - **Trình quản lý cửa sổ** (tự viết): kéo, đổi cỡ 8 hướng, thu nhỏ/phóng to/đóng,
   bấm đúp thanh tiêu đề để phóng to, kéo vào cạnh để chia đôi, thứ tự z. Phím
-  tắt: Super+←/→ (chia đôi), Super+↑ (phóng to), Alt+Tab, Ctrl+Alt+T (terminal).
-  Phím tắt bị trình duyệt giữ thì có phương án thay trong cài đặt.
+  tắt: Super+←/→ (chia đôi), Super+↑ (phóng to), giữ Alt + Tab (hoặc Alt+`) để
+  duyệt cửa sổ, Ctrl+Alt+T (terminal), Ctrl+Shift+Enter (tab Terminal mới), Ctrl+Alt+S
+  (Cài đặt). Mọi phím tắt đổi được trong Cài đặt; tổ hợp trình duyệt giữ (Ctrl+T,
+  Ctrl+W, Ctrl+Shift+T…) không cho gán.
 - **Lưu trạng thái**: vị trí/kích thước/danh sách cửa sổ, giao diện sáng/tối lưu
   ở `~/.config/metaos/desktop.json` qua kênh `fs`; đăng nhập lại thì phục hồi.
 - **Giao diện**: sáng/tối theo hệ điều hành, đổi tay được; phông Inter; màu định
@@ -166,13 +172,43 @@ Một WebSocket cho mỗi phiên trình duyệt, chia thành nhiều kênh.
 
 ### 5.2 Quản lý file
 - Breadcrumb, xem danh sách/lưới, sắp xếp theo tên/cỡ/ngày, hiện file ẩn.
-- Thao tác: mở, tạo thư mục, đổi tên, xoá (hỏi xác nhận), sao chép/di chuyển,
-  chmod/chown (hộp thoại quyền), nén/giải nén tar.gz và zip.
-- Tải lên: kéo thả, chia khúc 256 KiB, thanh tiến độ, huỷ được. Tải xuống: luồng
-  qua kênh; thư mục thì nén tar.gz khi tải.
+- Thao tác: mở, tạo thư mục, đổi tên, sao chép/di chuyển (trùng tên ⇒ hỏi Ghi đè /
+  Giữ cả hai / Bỏ qua, có "áp dụng cho tất cả"), chmod/chown (hộp thoại quyền),
+  nén tar.gz và zip; giải nén vào thư mục MỚI mang tên file nén đặt cạnh nó, chặn
+  mục trỏ ra ngoài (zip-slip), symlink thoát ra ngoài, file thiết bị, bit setuid.
+- Xoá: mặc định chuyển vào Thùng rác chuẩn freedesktop (`~/.local/share/Trash`,
+  dùng chung với GNOME Files), có mục "Thùng rác" để khôi phục / xoá hẳn / dọn
+  sạch. Ngoài thư mục nhà (hoặc khác hệ thống tệp với nhà) không có thùng rác ⇒
+  chỉ có "Xoá hẳn", xác nhận rõ (số mục, tên mục).
+- Tải lên: kéo thả hoặc chọn file, chia khúc 256 KiB, thanh tiến độ, huỷ được;
+  không giới hạn cỡ nhưng kiểm chỗ trống trước; ghi vào file tạm cùng thư mục rồi
+  mới đổi tên (không để lại file dở).
+- Tải xuống: `POST /api/download {path}` (CSRF) trả mã một lần (60 giây), trình
+  duyệt mở `GET /api/download/<mã>`; metaos-ws mở kênh đọc file thay trình duyệt
+  và chuyển luồng byte ra HTTP, không đọc nội dung. Thư mục ⇒ nén tar.gz trên
+  đường đi. Không giới hạn cỡ; tối đa 4 lượt tải đồng thời mỗi phiên.
 - Sửa file: Monaco cho file văn bản ≤ 5 MiB; cảnh báo khi file bị sửa từ nơi khác
-  (so mtime trước khi lưu). Xem ảnh trực tiếp.
-- Thao tác cần root (file của user khác): nút "Mở với sudo".
+  (so mtime trước khi lưu: Ghi đè / Tải lại / Huỷ). Văn bản > 5 MiB ⇒ xem 1 MiB
+  đầu, chỉ đọc; file nhị phân khác ⇒ chỉ tải xuống. Xem ảnh trực tiếp (png, jpg,
+  gif, webp, svg).
+- Lưu đè (Monaco, tải lên ghi đè): ghi vào đích thật của symlink, giữ nguyên link,
+  quyền và chủ; file user không có quyền ghi (chỉ-đọc, của người khác) ⇒ báo
+  `access-denied`, file cũ nguyên vẹn — không thay bằng đổi tên. File của người
+  khác mà user ghi được, hoặc file nằm trong thư mục user không tạo được file (vd.
+  `/srv/app` của root chứa file nhóm cho ghi) ⇒ ghi tại chỗ để giữ chủ và quyền;
+  cách này không nguyên tử — hỏng giữa chừng thì báo lỗi kèm đường dẫn bản đầy đủ
+  (file tạm trong `~/.cache/metaos`) để khôi phục.
+- Thao tác dài (sao chép, di chuyển, xoá, nén, giải nén) chạy tiếp khi kết nối chớp:
+  kết quả được giữ và gửi khi nối lại; mất kết nối quá 60 giây ⇒ huỷ và dọn phần
+  dở. Tải lên đang chạy thì bị huỷ khi mất kết nối (file đích nguyên vẹn), người
+  dùng tải lại. Tải lại trang hoặc mở tab thứ hai thì không tiếp quản thao tác dài
+  đang chạy: nó vẫn chạy xong (hoặc bị huỷ sau 60 giây), kết quả thấy khi tải lại
+  thư mục.
+- Cột Chủ sở hữu hiện tên tài khoản Linux; di chuột hiện họ tên (GECOS) nếu có.
+- Tên file không phải UTF-8: hiện kèm cảnh báo; thao tác qua Terminal (tên chứa
+  ký tự `�` thật cũng bị coi như vậy — giới hạn đã biết).
+- Thao tác cần root (file của user khác): M2 báo nguyên văn lỗi hệ thống kèm "Thao
+  tác cần quyền root — có ở M4"; nút "Mở với sudo" làm ở M4 cùng luồng sudo chung.
 
 ### 5.3 Giám sát hệ thống
 - Biểu đồ 60 giây gần nhất: CPU tổng + từng nhân, RAM/swap, IO đĩa, mạng theo
@@ -242,7 +278,7 @@ sang backend. `make dev` dựng cả hai.
 | Mốc | Nội dung | Dùng được gì khi xong |
 |---|---|---|
 | M1 | Protocol, ws, auth PAM (chưa TOTP), bridge, khung desktop + trình quản lý cửa sổ (chưa có góc nóng, khoá màn hình, chỉ báo CPU/RAM; chưa lưu trạng thái desktop ngoài chủ đề sáng/tối, chưa có trang cài đặt phím tắt — dời M2), Terminal | Đăng nhập và dùng terminal trong desktop web |
-| M2 | Quản lý file + Monaco; lưu trạng thái desktop; cài đặt phím tắt; góc nóng | Quản lý file |
+| M2 | Quản lý file (thùng rác freedesktop, nén/giải nén an toàn, tải lên chia khúc, tải xuống qua HTTP mã một lần) + Monaco + xem ảnh; lưu và khôi phục trạng thái desktop (`~/.config/metaos/desktop.json`); trang Cài đặt phím tắt; góc nóng; giữ Alt duyệt cửa sổ; giữ nhóm tab khi tiếp quản terminal. Chưa có: "Mở với sudo" (M4) | Quản lý file |
 | M3 | Giám sát hệ thống + tiến trình; chỉ báo CPU/RAM trên thanh trên cùng | Theo dõi máy |
 | M4 | Dịch vụ & log, luồng sudo | Quản trị dịch vụ |
 | M5 | TOTP, chặn dò mật khẩu, HTTPS tự ký, khoá màn hình, gói `.deb`, rà bảo mật | Được phép mở ra Internet |
