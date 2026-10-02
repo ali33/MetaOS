@@ -198,12 +198,19 @@ Một WebSocket cho mỗi phiên trình duyệt, chia thành nhiều kênh.
   `/srv/app` của root chứa file nhóm cho ghi) ⇒ ghi tại chỗ để giữ chủ và quyền;
   cách này không nguyên tử — hỏng giữa chừng thì báo lỗi kèm đường dẫn bản đầy đủ
   (file tạm trong `~/.cache/metaos`) để khôi phục.
-- Thao tác dài (sao chép, di chuyển, xoá, nén, giải nén) chạy tiếp khi kết nối chớp:
-  kết quả được giữ và gửi khi nối lại; mất kết nối quá 60 giây ⇒ huỷ và dọn phần
-  dở. Tải lên đang chạy thì bị huỷ khi mất kết nối (file đích nguyên vẹn), người
-  dùng tải lại. Tải lại trang hoặc mở tab thứ hai thì không tiếp quản thao tác dài
-  đang chạy: nó vẫn chạy xong (hoặc bị huỷ sau 60 giây), kết quả thấy khi tải lại
-  thư mục.
+- Thao tác dài (sao chép, di chuyển, xoá, nén, giải nén, thùng rác) khi mất kết nối:
+  - trong 60 giây đầu (kết nối chớp): thao tác chạy tiếp, kết quả được giữ và gửi
+    về khi nối lại;
+  - quá 60 giây, hoặc trang đã tải lại / đóng tab: thao tác vẫn **chạy tới xong**
+    trên máy chủ nhưng kết quả không còn gửi về — mở lại thư mục để thấy kết quả.
+    Chỉ đăng xuất hoặc phiên hết hạn mới huỷ (và dọn phần dở). Máy chủ không phân
+    biệt được "tải lại trang" với "mất mạng lâu".
+  - kết quả đã quá hạn giữ thì giao diện không chạy lại thao tác (tránh chép/chuyển
+    hai lần), chỉ báo "Thao tác có thể đã xong, kiểm tra lại" và làm mới thư mục.
+  Đang có thao tác dài chưa xong (hoặc file chưa lưu) mà tải lại / đóng tab thì trình
+  duyệt hỏi trước; trình duyệt chỉ hiện câu hỏi chung của nó.
+  Tải lên đang chạy thì bị huỷ khi mất kết nối (file đích nguyên vẹn), người dùng
+  tải lại.
 - Cột Chủ sở hữu hiện tên tài khoản Linux; di chuột hiện họ tên (GECOS) nếu có.
 - Tên file không phải UTF-8: hiện kèm cảnh báo; thao tác qua Terminal (tên chứa
   ký tự `�` thật cũng bị coi như vậy — giới hạn đã biết).
